@@ -1,0 +1,21 @@
+{
+  // Type-checks the JSDoc-annotated sources and the hand-written declarations.
+  // Nothing is emitted: the package ships src/*.js and *.d.ts as they are.
+  // Run with any TypeScript >= 5: npx -p typescript tsc -p tsconfig.json
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM"],
+    "types": [],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": false
+  },
+  "include": ["src/**/*.js", "index.d.ts", "angular.d.ts", "vue.d.ts", "test/types/**/*.ts"]
+}

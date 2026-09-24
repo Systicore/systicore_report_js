@@ -1,0 +1,14 @@
+# Normalise every text file to LF in the repository and the working tree.
+* text=auto eol=lf
+
+# Apps install this package from the GitHub tarball of a tag
+# (codeload.github.com/.../tar.gz/refs/tags/vX.Y.Z). GitHub builds that
+# archive with `git archive`, which honours export-ignore, so development-only
+# files stay out of every app's node_modules.
+/test export-ignore
+/.github export-ignore
+/tsconfig.json export-ignore
+/.editorconfig export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.prettierrc.json export-ignore

@@ -1,0 +1,51 @@
+{
+  "name": "@systicore/report",
+  "version": "0.1.0",
+  "description": "Browser error reporting client for the Systicore reports backend: build-free ESM, zero dependencies.",
+  "private": true,
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Systicore/systicore_report_js.git"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./angular": {
+      "types": "./angular.d.ts",
+      "default": "./src/angular.js"
+    },
+    "./vue": {
+      "types": "./vue.d.ts",
+      "default": "./src/vue.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "angular": [
+        "angular.d.ts"
+      ],
+      "vue": [
+        "vue.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "src",
+    "index.d.ts",
+    "angular.d.ts",
+    "vue.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js"
+  }
+}
