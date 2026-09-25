@@ -37,7 +37,7 @@ Entry points:
 | `@systicore/report/angular` | `ReportingErrorHandler`, `bootstrapWithReporting`, `reportHttpErrorResponse`, `isHttpErrorResponse` |
 | `@systicore/report/vue` | `installVueErrorHandler` |
 
-Bundle size: about 24 kB minified, 8–9 kB gzip, all of it in the initial
+Bundle size: about 25 kB minified, 9 kB gzip, all of it in the initial
 bundle, because the reporter has to be ready before the app bootstraps.
 An Angular app close to its `initial` budget (500 kB warning by default)
 may cross it; raise the budget in `angular.json` rather than splitting the
@@ -88,7 +88,8 @@ Other options:
 ## Angular (zoneless)
 
 `src/main.ts`: initialize before bootstrapping, and bootstrap through
-`bootstrapWithReporting`, so a failed start is reported as critical:
+`bootstrapWithReporting`, so the error that stops the start is reported as
+critical:
 
 ```ts
 import { bootstrapApplication } from '@angular/platform-browser';
@@ -119,12 +120,24 @@ as v0.1.0 suggested: Angular hands an app-initializer or root-component
 failure to the ErrorHandler *before* the bootstrap promise rejects. By the
 time the `.catch()` runs, `ReportingErrorHandler` has already reported the
 error at the default severity, and the second capture of the same object
-is dropped. `bootstrapWithReporting` marks the bootstrap phase instead:
-while it runs, `ReportingErrorHandler` reports with action `bootstrap` and
-severity `critical`. It also reports the rejection itself, which covers
-failures thrown before the ErrorHandler exists (environment initializers)
-and an HTTP 4xx that stops the start. One error is still sent once, and
-the returned promise settles like `bootstrapApplication`'s own.
+is dropped.
+
+`bootstrapWithReporting` holds back what `ReportingErrorHandler` would
+report while the bootstrap runs: until it settles, and at most 1 s per
+error, so a start that hangs delays other errors briefly and escalates
+none. Then:
+
+| Error | Reported as |
+|---|---|
+| The one the bootstrap rejects with, unless an HTTP row below applies | action `bootstrap`, severity `critical`, whether or not the ErrorHandler saw it (an environment initializer fails before the ErrorHandler exists) |
+| Any other error met meanwhile (a third-party script error, a `ResizeObserver` loop) | as usual: default severity, no action |
+| An HTTP failure the interceptor (or `reportHttpError`) already reported: status ≥ 500, or a network failure while online | its HTTP event only, e.g. `HTTP_503` at `error` or `NETWORK_ERROR` at `warning` with action `GET /api/config`; no second event |
+| A network failure while offline | not reported, like any offline failure |
+| Any other HTTP status (a 4xx), which the interceptor keeps only as a breadcrumb | action `bootstrap`, severity `critical`: a start a client error stops is a bug |
+| An error a `beforeHandle` hook skipped or handled | not reported |
+
+One error object is still sent once, and the returned promise settles like
+`bootstrapApplication`'s own.
 
 `src/app/app.config.ts`:
 
@@ -421,7 +434,8 @@ request": a POST with a `text/plain;charset=UTF-8` body and the key in
 - **Flood control.** An identical error (type, code, message, action)
   within 60 s is sent once, and the same `Error` object is never sent
   twice. An error object passed to `reportHttpError` is never reported
-  again as an uncaught error. At most 20 events per minute are sent.
+  again as an uncaught error (only a 4xx that stops an Angular start is,
+  see `bootstrapWithReporting`). At most 20 events per minute are sent.
 
 ## Development
 
@@ -441,7 +455,7 @@ out `test/` and the tooling files (see `.gitattributes`).
 
 ## Changelog
 
-### 0.2.0 (not tagged yet)
+### 0.2.0
 
 Backward compatible: apps on 0.1.0 compile and run unchanged. Behaviour
 changes only where 0.1.0 was wrong.
@@ -457,8 +471,12 @@ Added:
   e.g. for a reload after a chunk-load failure. `useClass:
   ReportingErrorHandler` keeps working as before.
 - `bootstrapWithReporting(() => bootstrapApplication(App, appConfig))`
-  (Angular): reports a failed start as `critical` with action `bootstrap`.
-  The `bootstrapApplication(...).catch(captureException(...))` pattern of the
+  (Angular): reports the error that stops the start as `critical` with
+  action `bootstrap`. Other errors met during the start keep their usual
+  severity, and HTTP failures the interceptor already reported (≥ 500, or a
+  network failure while online) keep their HTTP event; offline network
+  failures stay unreported. The
+  `bootstrapApplication(...).catch(captureException(...))` pattern of the
   0.1.0 README never produced `critical` for app-initializer or
   root-component failures, because Angular reports them to the ErrorHandler
   before the promise rejects.
@@ -470,14 +488,15 @@ Fixed:
   app lets escape is no longer reported again as an uncaught error by
   `installGlobalHandlers()`, `installVueErrorHandler` or
   `ReportingErrorHandler`. Explicit `captureException()` calls are
-  unaffected.
+  unaffected, and a 4xx that stops an Angular start is still reported by
+  `bootstrapWithReporting`.
 - The same error object passed to `reportHttpError` twice (an interceptor,
   then `ReportingErrorHandler`) no longer adds a second `http` breadcrumb.
 - `package.json` declared `"sideEffects": false` although the reporter, the
   Angular bootstrap phase and the Vue handler registry keep module-level
   state. It now lists those modules, so bundlers never drop them.
 
-Size: about 2 kB minified (0.6 kB gzip) more than 0.1.0.
+Size: about 3 kB minified (1 kB gzip) more than 0.1.0.
 
 ### 0.1.0
 
