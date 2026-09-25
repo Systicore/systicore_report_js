@@ -20,12 +20,12 @@ Apps install a tagged GitHub tarball. The `node:alpine` builders have no
 git, and the tarball needs no token:
 
 ```bash
-npm install https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.1.0
+npm install https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.2.0
 ```
 
 ```json
 "dependencies": {
-  "@systicore/report": "https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.1.0"
+  "@systicore/report": "https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.2.0"
 }
 ```
 
@@ -34,8 +34,19 @@ Entry points:
 | Import | Contents |
 |---|---|
 | `@systicore/report` | `init`, `captureException`, `captureMessage`, `reportHttpError`, `setUser`, `addBreadcrumb`, `installGlobalHandlers`, `flush`, `isEnabled` |
-| `@systicore/report/angular` | `ReportingErrorHandler`, `reportHttpErrorResponse`, `isHttpErrorResponse` |
+| `@systicore/report/angular` | `ReportingErrorHandler`, `bootstrapWithReporting`, `reportHttpErrorResponse`, `isHttpErrorResponse` |
 | `@systicore/report/vue` | `installVueErrorHandler` |
+
+Bundle size: about 24 kB minified, 8–9 kB gzip, all of it in the initial
+bundle, because the reporter has to be ready before the app bootstraps.
+An Angular app close to its `initial` budget (500 kB warning by default)
+may cross it; raise the budget in `angular.json` rather than splitting the
+error handler into a lazy chunk.
+
+`package.json` lists the modules that keep module-level state (the
+reporter, the Angular bootstrap phase, the Vue handler registry) under
+`sideEffects`, so bundlers never drop them. Importing an entry point by
+itself still does nothing: reporting starts with `init()`.
 
 ## Configuration
 
@@ -66,6 +77,8 @@ Other options:
 | `release` | none | `{ version, commit, buildTime }`. `version` is also sent as `device.appVersion`. |
 | `userProvider` | none | `() => ({ id, issuer? }) \| null`, read at every capture. It wins over `setUser()` when it returns a user. |
 | `routeProvider` | none | `() => string \| null`, the current route template, used when a capture has no `route`. |
+| `tags` | none | Tags added to every event, e.g. `{ image: 'tarp-planner_web:1.4.2' }`, copied at `init()`. A capture's own tags win on a key clash and are kept first under the 10-tag limit. |
+| `breadcrumbsProvider` | none | `() => Array<{ category?, message, ts? } \| string> \| null`, read at every capture: steps from the app's own log, oldest first. They are merged with the reporter's breadcrumbs by time and the newest 20 are sent. `ts` is a `Date`, epoch milliseconds or an RFC 3339 string (default: the capture time). Only the last 20 returned entries are read; a provider that throws is ignored. |
 | `beforeSend` | none | `(event) => event \| null`, a synchronous hook to change or drop an event. A hook that throws drops the event. |
 | `maxQueue` | `30` | Events kept while offline or backing off. Beyond it, the oldest is dropped. |
 | `useIndexedDbQueue` | `false` | Persists the queue in IndexedDB, so events captured offline survive a reload. For offline-first PWAs. |
@@ -74,11 +87,13 @@ Other options:
 
 ## Angular (zoneless)
 
-`src/main.ts`: initialize before bootstrapping, and report a failed bootstrap:
+`src/main.ts`: initialize before bootstrapping, and bootstrap through
+`bootstrapWithReporting`, so a failed start is reported as critical:
 
 ```ts
 import { bootstrapApplication } from '@angular/platform-browser';
-import { captureException, init } from '@systicore/report';
+import { init } from '@systicore/report';
+import { bootstrapWithReporting } from '@systicore/report/angular';
 
 import { App } from './app/app';
 import { appConfig } from './app/app.config';
@@ -94,11 +109,22 @@ init({
   release: { version: APP_VERSION, commit: APP_COMMIT, buildTime: APP_BUILD_TIME },
 });
 
-bootstrapApplication(App, appConfig).catch((error: unknown) => {
-  console.error(error);
-  captureException(error, { action: 'bootstrap', severity: 'critical' });
-});
+bootstrapWithReporting(() => bootstrapApplication(App, appConfig)).catch((error: unknown) =>
+  console.error(error),
+);
 ```
+
+Why not `bootstrapApplication(...).catch(error => captureException(error, { severity: 'critical' }))`,
+as v0.1.0 suggested: Angular hands an app-initializer or root-component
+failure to the ErrorHandler *before* the bootstrap promise rejects. By the
+time the `.catch()` runs, `ReportingErrorHandler` has already reported the
+error at the default severity, and the second capture of the same object
+is dropped. `bootstrapWithReporting` marks the bootstrap phase instead:
+while it runs, `ReportingErrorHandler` reports with action `bootstrap` and
+severity `critical`. It also reports the rejection itself, which covers
+failures thrown before the ErrorHandler exists (environment initializers)
+and an HTTP 4xx that stops the start. One error is still sent once, and
+the returned promise settles like `bootstrapApplication`'s own.
 
 `src/app/app.config.ts`:
 
@@ -138,7 +164,52 @@ export const appConfig: ApplicationConfig = {
   (status 0). It reduces the URL to a path template, e.g. `/api/items/42` →
   `/api/items/:id`.
 - An HttpErrorResponse that passes both the interceptor and the
-  ErrorHandler is sent once.
+  ErrorHandler is handled once: one report (for ≥ 500 and 0) and one
+  `http` breadcrumb. An error object the app passed to `reportHttpError`
+  itself (see the Vue section) is logged by the ErrorHandler but not
+  reported again.
+
+To act on an error before it is logged and reported, for example to reload
+the page after a failed lazy chunk, give the handler a `beforeHandle` hook.
+Construct it with `useFactory`; the factory runs in an injection context,
+so it may `inject()` what the hook needs:
+
+```ts
+import { ReportingErrorHandler } from '@systicore/report/angular';
+
+const CHUNK_LOAD_FAILURE = /Loading chunk [\w-]+ failed|Failed to fetch dynamically imported module/;
+
+{
+  provide: ErrorHandler,
+  useFactory: () =>
+    new ReportingErrorHandler({
+      beforeHandle: (error) => {
+        if (error instanceof Error && CHUNK_LOAD_FAILURE.test(error.message)) {
+          location.reload();
+          return 'handled';
+        }
+        return 'report';
+      },
+    }),
+},
+```
+
+`beforeHandle` receives the error with a Zone.js promise rejection
+unwrapped and returns:
+
+| Decision | Logged | Reported |
+|---|---|---|
+| `'report'` (also no return value, any other value, or a hook that throws) | yes | yes |
+| `'skip'` | yes | no |
+| `'handled'` | no | no |
+
+`bootstrapWithReporting` respects the decision: an error the hook skipped
+or handled is not reported as a bootstrap failure either. A subclass
+(`class AppErrorHandler extends ReportingErrorHandler` that overrides
+`handleError` and calls `super.handleError(error)` for the rest) works
+too, but an error it swallows without calling `super` during bootstrap is
+still reported by `bootstrapWithReporting`; use `beforeHandle` when that
+matters.
 
 The session cookie is HttpOnly, so the app can only claim its user. The
 server stores that user unverified. Set it wherever the app tracks the
@@ -164,6 +235,7 @@ import { init, installGlobalHandlers } from '@systicore/report';
 import { installVueErrorHandler } from '@systicore/report/vue';
 
 import App from './App.vue';
+import { sessionLogger } from './core/session-logger';
 import { useAuthStore } from './core/stores/auth.store';
 
 const pinia = createPinia();
@@ -181,6 +253,8 @@ init({
     const user = useAuthStore(pinia).user;
     return user ? { id: user.id } : null;
   },
+  tags: { image: import.meta.env.VITE_IMAGE_TAG },
+  breadcrumbsProvider: () => sessionLogger.recentSteps(), // [{ category: 'ui', message, ts }]
 });
 installGlobalHandlers(); // window 'error' + 'unhandledrejection'
 
@@ -198,7 +272,8 @@ also records the matched route template.
 
 To report failed API calls, add `reportHttpError` to the app's fetch
 wrapper. Only status ≥ 500 and network failures are sent; every call is
-kept as an `http` breadcrumb.
+kept as an `http` breadcrumb. Pass the error object the wrapper throws as
+`error`:
 
 ```ts
 import { reportHttpError } from '@systicore/report';
@@ -211,9 +286,26 @@ try {
   throw error;
 }
 if (!response.ok) {
-  reportHttpError({ method, url, status: response.status, requestId: response.headers.get('X-Request-Id') });
+  const failure = new ApiError(response.status, await response.text());
+  reportHttpError({
+    method,
+    url,
+    status: response.status,
+    requestId: response.headers.get('X-Request-Id'),
+    error: failure,
+  });
+  throw failure;
 }
 ```
+
+Every error object passed to `reportHttpError` is remembered, whether it
+was reported or not. When the app lets it escape (an `async` click handler
+without `try`/`catch`, say), `installGlobalHandlers()` and
+`installVueErrorHandler` leave it alone, so a 4xx `ApiError` or an offline
+`Failed to fetch` does not come back as an uncaught error. The Vue handler
+chain still runs. An explicit `captureException(failure)` still reports a
+4xx the app wants reported. Passing the same object to `reportHttpError`
+again adds neither a report nor a breadcrumb.
 
 Pass `urlTemplate: '/api/measurements/:id'` instead of `url` when the
 wrapper knows the route. Otherwise numeric, UUID, hex, token and e-mail
@@ -328,7 +420,8 @@ request": a POST with a `text/plain;charset=UTF-8` body and the key in
   while the circuit breaker or `Retry-After` holds.
 - **Flood control.** An identical error (type, code, message, action)
   within 60 s is sent once, and the same `Error` object is never sent
-  twice. At most 20 events per minute are sent.
+  twice. An error object passed to `reportHttpError` is never reported
+  again as an uncaught error. At most 20 events per minute are sent.
 
 ## Development
 
@@ -341,7 +434,54 @@ The tests stub `fetch`, `sendBeacon`, timers, the window and IndexedDB.
 `test/types/consumer.ts` compiles the public declarations through the
 package's own `exports` map.
 
-To release, bump `version` in `package.json`, then commit, tag
-`vX.Y.Z` and push the tag. Apps then point their dependency at the new
-tag's tarball URL. The archive leaves out `test/` and the tooling files
-(see `.gitattributes`).
+To release, bump `version` in `package.json`, add a section to the
+changelog below, then commit, tag `vX.Y.Z` and push the tag. Apps then
+point their dependency at the new tag's tarball URL. The archive leaves
+out `test/` and the tooling files (see `.gitattributes`).
+
+## Changelog
+
+### 0.2.0 (not tagged yet)
+
+Backward compatible: apps on 0.1.0 compile and run unchanged. Behaviour
+changes only where 0.1.0 was wrong.
+
+Added:
+
+- `init({ tags })`: tags added to every event. A capture's own tags win on
+  a key clash and are kept first under the 10-tag limit.
+- `init({ breadcrumbsProvider })`: breadcrumbs from the app's own step log,
+  read at every capture and merged with the reporter's trail by time.
+- `new ReportingErrorHandler({ beforeHandle })` (Angular): a hook that runs
+  first and decides `'report'`, `'skip'` (log only) or `'handled'` (neither),
+  e.g. for a reload after a chunk-load failure. `useClass:
+  ReportingErrorHandler` keeps working as before.
+- `bootstrapWithReporting(() => bootstrapApplication(App, appConfig))`
+  (Angular): reports a failed start as `critical` with action `bootstrap`.
+  The `bootstrapApplication(...).catch(captureException(...))` pattern of the
+  0.1.0 README never produced `critical` for app-initializer or
+  root-component failures, because Angular reports them to the ErrorHandler
+  before the promise rejects.
+
+Fixed:
+
+- `reportHttpError` remembers every error object it is given, not only the
+  ones it reports. A 4xx `ApiError` or an offline `Failed to fetch` that the
+  app lets escape is no longer reported again as an uncaught error by
+  `installGlobalHandlers()`, `installVueErrorHandler` or
+  `ReportingErrorHandler`. Explicit `captureException()` calls are
+  unaffected.
+- The same error object passed to `reportHttpError` twice (an interceptor,
+  then `ReportingErrorHandler`) no longer adds a second `http` breadcrumb.
+- `package.json` declared `"sideEffects": false` although the reporter, the
+  Angular bootstrap phase and the Vue handler registry keep module-level
+  state. It now lists those modules, so bundlers never drop them.
+
+Size: about 2 kB minified (0.6 kB gzip) more than 0.1.0.
+
+### 0.1.0
+
+First release: `init`, `captureException`, `captureMessage`,
+`reportHttpError`, `setUser`, `addBreadcrumb`, `installGlobalHandlers`,
+`flush`, `isEnabled`; the Angular `ReportingErrorHandler` and
+`reportHttpErrorResponse`; the Vue `installVueErrorHandler`.

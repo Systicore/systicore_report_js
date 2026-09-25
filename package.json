@@ -1,6 +1,6 @@
 {
   "name": "@systicore/report",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser error reporting client for the Systicore reports backend: build-free ESM, zero dependencies.",
   "private": true,
   "license": "UNLICENSED",
