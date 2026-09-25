@@ -8,7 +8,7 @@
  * debug on) and the capture reports false.
  */
 
-import { BreadcrumbTrail } from './breadcrumbs.js';
+import { BreadcrumbTrail, mergeProvidedBreadcrumbs } from './breadcrumbs.js';
 import { resolveConfiguration } from './configuration.js';
 import { attachDeliveryTriggers } from './delivery-triggers.js';
 import { describeDevice, resolveInstallId } from './device.js';
@@ -17,10 +17,11 @@ import { describeError } from './error-description.js';
 import { EventQueue, NULL_STORE } from './event-queue.js';
 import { assembleEvent, limitEvent } from './event-builder.js';
 import {
+  HTTP_VERDICTS,
   breadcrumbOfHttpCall,
   captureOfHttpFailure,
   describeHttpCall,
-  isReportableHttpFailure,
+  judgeHttpCall,
 } from './http-failure.js';
 import { IndexedDbStore, queueDatabaseName } from './indexed-db-store.js';
 import { createLogger } from './logger.js';
@@ -49,6 +50,8 @@ import {
  * @typedef {object} Reporter
  * @property {boolean} enabled
  * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureException
+ * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureUncaughtError
+ * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureStartupFailure
  * @property {(message: unknown, options?: CaptureOptions | null) => boolean} captureMessage
  * @property {(details: import('./http-failure.js').HttpFailureDetails) => boolean} reportHttpError
  * @property {(user: { id?: unknown, issuer?: unknown } | null | undefined) => void} setUser
@@ -87,6 +90,14 @@ export class DisabledReporter {
     return false;
   }
 
+  captureUncaughtError() {
+    return false;
+  }
+
+  captureStartupFailure() {
+    return false;
+  }
+
   captureMessage() {
     return false;
   }
@@ -121,6 +132,14 @@ export class ActiveReporter {
   #explicitUser = null;
   /** Error objects already reported, so one error seen by two handlers is sent once. */
   #reportedErrors = new WeakSet();
+  /**
+   * The verdict on every error object passed to reportHttpError, reported or
+   * not. The HTTP layer has decided about each of them, so a second pass and
+   * the handlers of uncaught errors respect that decision.
+   *
+   * @type {WeakMap<object, import('./http-failure.js').HttpVerdict>}
+   */
+  #httpVerdicts = new WeakMap();
 
   /**
    * @param {import('./configuration.js').Configuration} configuration
@@ -185,6 +204,55 @@ export class ActiveReporter {
   }
 
   /**
+   * Reports an error nobody handled: from the window listeners or a
+   * framework's error handler. An error object the app passed to
+   * reportHttpError is skipped, because the HTTP layer already reported it or
+   * decided it is not worth a report (a 4xx, a network failure while
+   * offline). Explicit captureException() calls are not affected.
+   *
+   * @param {unknown} error
+   * @param {CaptureOptions | null} [options]
+   * @returns {boolean} true when the event was queued for delivery
+   */
+  captureUncaughtError(error, options) {
+    try {
+      if (this.#httpVerdictOf(error) !== undefined) {
+        return false;
+      }
+      return this.captureException(error, options);
+    } catch (failure) {
+      this.#logger.warn('captureUncaughtError failed', failure);
+      return false;
+    }
+  }
+
+  /**
+   * Reports the error that stopped the app from starting (the Angular
+   * bootstrap helper passes action "bootstrap" and severity "critical").
+   * Like captureUncaughtError, except that an error object the HTTP layer
+   * kept only as a breadcrumb because of its status (a 4xx) is reported: a
+   * start that a client error stops is a bug. One the HTTP layer reported
+   * keeps its HTTP event, and a network failure while offline stays
+   * unreported.
+   *
+   * @param {unknown} error
+   * @param {CaptureOptions | null} [options]
+   * @returns {boolean} true when the event was queued for delivery
+   */
+  captureStartupFailure(error, options) {
+    try {
+      const verdict = this.#httpVerdictOf(error);
+      if (verdict !== undefined && verdict !== HTTP_VERDICTS.CLIENT_FAILURE) {
+        return false;
+      }
+      return this.captureException(error, options);
+    } catch (failure) {
+      this.#logger.warn('captureStartupFailure failed', failure);
+      return false;
+    }
+  }
+
+  /**
    * @param {unknown} message
    * @param {CaptureOptions | null} [options]
    * @returns {boolean}
@@ -211,7 +279,9 @@ export class ActiveReporter {
   /**
    * Reports a failed HTTP call of the app when it is a server fault (>= 500)
    * or a network failure while online. Every call, reported or not, becomes
-   * an "http" breadcrumb.
+   * an "http" breadcrumb. An error object passed a second time (the same
+   * failure seen by an interceptor and then by the ErrorHandler) is ignored
+   * entirely: no second report and no second breadcrumb.
    *
    * @param {import('./http-failure.js').HttpFailureDetails} details
    * @returns {boolean}
@@ -219,13 +289,19 @@ export class ActiveReporter {
   reportHttpError(details) {
     try {
       const httpFailure = details ?? {};
+      if (this.#httpVerdictOf(httpFailure.error) !== undefined) {
+        return false;
+      }
       const call = describeHttpCall(httpFailure);
-      if (call.target?.startsWith(this.#configuration.url)) {
+      const verdict = judgeHttpCall(call, this.#configuration.url, isOnline(this.#runtime));
+      if (canBeRemembered(httpFailure.error)) {
+        this.#httpVerdicts.set(httpFailure.error, verdict);
+      }
+      if (verdict === HTTP_VERDICTS.REPORTING_ENDPOINT) {
         return false;
       }
       const reported =
-        isReportableHttpFailure(call) &&
-        (call.status !== undefined || isOnline(this.#runtime)) &&
+        verdict === HTTP_VERDICTS.REPORTABLE &&
         this.#claimReport(httpFailure.error) &&
         this.#submit(captureOfHttpFailure(call, httpFailure));
       this.#breadcrumbs.add({ category: 'http', message: breadcrumbOfHttpCall(call) });
@@ -333,8 +409,9 @@ export class ActiveReporter {
       device: this.#device,
       user: this.#currentUser(),
       url: this.#runtime.location?.href,
-      route: this.#callProvider(this.#configuration.routeProvider),
-      breadcrumbs: this.#breadcrumbs.snapshot(),
+      route: this.#callProvider(this.#configuration.routeProvider, 'routeProvider'),
+      tags: this.#configuration.tags,
+      breadcrumbs: this.#currentBreadcrumbs(),
     };
   }
 
@@ -342,7 +419,7 @@ export class ActiveReporter {
    * @returns {{ id?: unknown, issuer?: unknown } | null}
    */
   #currentUser() {
-    const provided = this.#callProvider(this.#configuration.userProvider);
+    const provided = this.#callProvider(this.#configuration.userProvider, 'userProvider');
     if (typeof provided === 'object' && provided !== null) {
       return /** @type {{ id?: unknown, issuer?: unknown }} */ (provided);
     }
@@ -350,17 +427,38 @@ export class ActiveReporter {
   }
 
   /**
+   * The trail plus the app's breadcrumbsProvider steps. Entries the merge
+   * cannot read cost the provided steps, never the report.
+   *
+   * @returns {import('./event-builder.js').Breadcrumb[]}
+   */
+  #currentBreadcrumbs() {
+    const trail = this.#breadcrumbs.snapshot();
+    const provided = this.#callProvider(
+      this.#configuration.breadcrumbsProvider,
+      'breadcrumbsProvider',
+    );
+    try {
+      return mergeProvidedBreadcrumbs(trail, provided, this.#runtime.now());
+    } catch (failure) {
+      this.#logger.warn('the breadcrumbsProvider result could not be read', failure);
+      return trail;
+    }
+  }
+
+  /**
    * @param {(() => unknown) | undefined} provider
+   * @param {string} optionName for the debug log
    * @returns {unknown}
    */
-  #callProvider(provider) {
+  #callProvider(provider, optionName) {
     if (!provider) {
       return undefined;
     }
     try {
       return provider() ?? undefined;
     } catch (failure) {
-      this.#logger.warn('a userProvider or routeProvider threw', failure);
+      this.#logger.warn(`${optionName} threw`, failure);
       return undefined;
     }
   }
@@ -375,7 +473,7 @@ export class ActiveReporter {
    * @returns {boolean}
    */
   #claimReport(error) {
-    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    if (!canBeRemembered(error)) {
       return true;
     }
     if (this.#reportedErrors.has(error)) {
@@ -383,6 +481,18 @@ export class ActiveReporter {
     }
     this.#reportedErrors.add(error);
     return true;
+  }
+
+  /**
+   * What reportHttpError decided about `error`; undefined when the HTTP
+   * layer never saw it. Primitive values and a missing error are never
+   * remembered.
+   *
+   * @param {unknown} error
+   * @returns {import('./http-failure.js').HttpVerdict | undefined}
+   */
+  #httpVerdictOf(error) {
+    return canBeRemembered(error) ? this.#httpVerdicts.get(error) : undefined;
   }
 
   /**
@@ -395,4 +505,15 @@ export class ActiveReporter {
     }
     return new IndexedDbStore(this.#runtime.indexedDB, queueDatabaseName(source));
   }
+}
+
+/**
+ * Whether `value` can be kept in a WeakSet: objects and functions can,
+ * primitives (a thrown string, undefined) cannot.
+ *
+ * @param {unknown} value
+ * @returns {value is object}
+ */
+function canBeRemembered(value) {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
 }

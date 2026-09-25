@@ -63,10 +63,49 @@ export function describeHttpCall(details) {
 }
 
 /**
+ * What reportHttpError decided about a failed call, remembered for its error
+ * object so the handlers of uncaught errors can respect it:
+ * - "reportable": a server fault (>= 500) or a network failure while online;
+ *   an HTTP event was submitted.
+ * - "client-failure": any other status (a 4xx, a 200 whose body could not be
+ *   parsed); only a breadcrumb.
+ * - "offline": a network failure while the device is offline; only a
+ *   breadcrumb.
+ * - "reporting-endpoint": a call to the reports backend itself; ignored.
+ *
+ * @typedef {'reportable' | 'client-failure' | 'offline' | 'reporting-endpoint'} HttpVerdict
+ */
+
+export const HTTP_VERDICTS = Object.freeze(
+  /** @type {const} */ ({
+    REPORTABLE: 'reportable',
+    CLIENT_FAILURE: 'client-failure',
+    OFFLINE: 'offline',
+    REPORTING_ENDPOINT: 'reporting-endpoint',
+  }),
+);
+
+/**
+ * @param {HttpCall} call
+ * @param {string} reportsUrl the reporter's own backend
+ * @param {boolean} online
+ * @returns {HttpVerdict}
+ */
+export function judgeHttpCall(call, reportsUrl, online) {
+  if (call.target?.startsWith(reportsUrl)) {
+    return HTTP_VERDICTS.REPORTING_ENDPOINT;
+  }
+  if (!isReportableHttpFailure(call)) {
+    return HTTP_VERDICTS.CLIENT_FAILURE;
+  }
+  return call.status !== undefined || online ? HTTP_VERDICTS.REPORTABLE : HTTP_VERDICTS.OFFLINE;
+}
+
+/**
  * @param {HttpCall} call
  * @returns {boolean}
  */
-export function isReportableHttpFailure(call) {
+function isReportableHttpFailure(call) {
   return call.status === undefined || call.status >= FIRST_SERVER_ERROR_STATUS;
 }
 

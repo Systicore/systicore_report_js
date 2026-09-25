@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, mock, test } from 'node:test';
 
-import { flush, init } from '../src/index.js';
+import { flush, init, reportHttpError } from '../src/index.js';
 import { installVueErrorHandler } from '../src/vue.js';
 import { VALID_OPTIONS, createFetchRecorder } from './support/fake-runtime.js';
 
@@ -86,6 +86,19 @@ describe('Vue adapter', () => {
 
     assert.deepEqual(calls, [[app, error, instance, 'watcher callback']]);
     assert.equal(recorder.requests.length, 1);
+  });
+
+  test('skips an error the app passed to reportHttpError, but still chains', async () => {
+    const calls = [];
+    const app = { config: { errorHandler: (error) => calls.push(error) } };
+    installVueErrorHandler(app);
+    const apiError = Object.assign(new Error('Forbidden'), { status: 403 });
+    reportHttpError({ method: 'GET', urlTemplate: '/api/plans/:id', status: 403, error: apiError });
+    /** @type {any} */ (app.config.errorHandler)(apiError, componentInstance(), 'setup function');
+    await flush();
+
+    assert.deepEqual(calls, [apiError]);
+    assert.equal(recorder.requests.length, 0);
   });
 
   test('without a previous handler the error is still logged', () => {

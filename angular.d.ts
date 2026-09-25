@@ -18,13 +18,63 @@ export interface HttpErrorResponseLike {
 }
 
 /**
- * Drop-in ErrorHandler: `{ provide: ErrorHandler, useClass: ReportingErrorHandler }`.
+ * What `beforeHandle` decides about an error:
+ * - "report": log it like Angular's default handler and report it (the default).
+ * - "skip": log it, but do not report it.
+ * - "handled": the hook took care of it (e.g. reloaded the page after a
+ *   chunk-load failure), so it is neither logged nor reported.
+ */
+export type ErrorHandlingDecision = 'report' | 'skip' | 'handled';
+
+export interface ReportingErrorHandlerOptions {
+  /**
+   * Runs first for every error, with a Zone.js promise rejection unwrapped.
+   * Synchronous. No return value, any other value and a hook that throws
+   * all count as "report".
+   */
+  beforeHandle?: ((error: unknown) => ErrorHandlingDecision | void) | undefined;
+}
+
+/**
+ * Drop-in ErrorHandler: `{ provide: ErrorHandler, useClass: ReportingErrorHandler }`,
+ * or `useFactory: () => new ReportingErrorHandler({ beforeHandle })` for a hook.
  * Logs like Angular's default handler and reports the error; an
- * HttpErrorResponse is reported only for status >= 500 or 0.
+ * HttpErrorResponse is reported only for status >= 500 or 0, and an error
+ * object the app already passed to reportHttpError is not reported again.
  */
 export declare class ReportingErrorHandler {
+  constructor(options?: ReportingErrorHandlerOptions | null);
   handleError(error: unknown): void;
 }
+
+/**
+ * Runs Angular's bootstrap so that the error that stops the start is
+ * reported with action "bootstrap" and severity "critical":
+ *
+ * ```ts
+ * bootstrapWithReporting(() => bootstrapApplication(App, appConfig)).catch((error) =>
+ *   console.error(error),
+ * );
+ * ```
+ *
+ * Angular reports an app-initializer or root-component failure to the
+ * ErrorHandler before the bootstrap promise rejects. While `bootstrap` runs,
+ * ReportingErrorHandler therefore holds its reports until the bootstrap
+ * settles (at most 1 s each): the error the bootstrap rejects with is
+ * reported as critical, every other error at its usual severity. The
+ * rejection is reported even when the ErrorHandler never saw it (thrown
+ * before the ErrorHandler exists).
+ *
+ * HTTP failures follow the HTTP layer: one it already reported (status
+ * >= 500, or a network failure while online) keeps its HTTP event and
+ * severity, a network failure while offline is not reported, and any other
+ * status (a 4xx) is reported as critical. An error a `beforeHandle` hook
+ * skipped or handled is left alone.
+ * @returns a promise that settles like the bootstrap's own
+ */
+export declare function bootstrapWithReporting<Result>(
+  bootstrap: () => Result | PromiseLike<Result>,
+): Promise<Result>;
 
 /** True for Angular's HttpErrorResponse (checked by shape). */
 export declare function isHttpErrorResponse(value: unknown): value is HttpErrorResponseLike;

@@ -59,6 +59,7 @@ const SCRUB_INPUT_HEADROOM = 2;
  * @property {{ id?: unknown, issuer?: unknown } | null} [user]
  * @property {unknown} [url]
  * @property {unknown} [route]
+ * @property {Record<string, unknown>} [tags] the global tags of init()
  * @property {ReadonlyArray<Breadcrumb>} [breadcrumbs]
  */
 
@@ -116,10 +117,36 @@ export function assembleEvent(capture, scope) {
       route: capture.route ?? scope.route,
       url: scope.url,
       requestId: capture.requestId,
-      tags: capture.tags,
+      tags: mergeTags(capture.tags, scope.tags),
       breadcrumbs: scope.breadcrumbs,
     },
   };
+}
+
+/**
+ * The capture's own tags first, then the global tags whose keys the capture
+ * does not set: the capture wins a key clash, and its tags are the last to
+ * fall off the 10-tag limit.
+ *
+ * @param {unknown} captureTags
+ * @param {unknown} globalTags
+ * @returns {unknown}
+ */
+function mergeTags(captureTags, globalTags) {
+  if (!isRecord(globalTags)) {
+    return captureTags;
+  }
+  if (!isRecord(captureTags)) {
+    return globalTags;
+  }
+  /** @type {Map<string, unknown>} a Map, so a "__proto__" key stays an own property */
+  const merged = new Map(Object.entries(captureTags));
+  for (const [key, value] of Object.entries(globalTags)) {
+    if (!merged.has(key)) {
+      merged.set(key, value);
+    }
+  }
+  return Object.fromEntries(merged);
 }
 
 /**

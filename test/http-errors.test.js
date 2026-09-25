@@ -139,6 +139,147 @@ describe('reportHttpError', () => {
     await reporter.flush();
     assert.equal(requests.length, 1);
   });
+
+  test('the same error object passed twice adds no second report and no second breadcrumb', async () => {
+    const { reporter, requests } = setUp();
+    const serverFailure = new Error('Http failure response');
+    const clientFailure = new Error('Not found');
+    const serverCall = { method: 'GET', urlTemplate: '/api/a', status: 503, error: serverFailure };
+    const clientCall = { method: 'GET', urlTemplate: '/api/b', status: 404, error: clientFailure };
+    const serverFailureWithoutRequest = {
+      url: 'https://api.example/api/a/topps-chrome',
+      status: 503,
+      error: serverFailure,
+    };
+    assert.equal(reporter.reportHttpError(serverCall), true);
+    assert.equal(reporter.reportHttpError(serverFailureWithoutRequest), false);
+    assert.equal(reporter.reportHttpError(clientCall), false);
+    assert.equal(reporter.reportHttpError(clientCall), false);
+    reporter.captureMessage('later failure');
+    await reporter.flush();
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(
+      requests[1].body.context.breadcrumbs.map((breadcrumb) => breadcrumb.message),
+      ['GET /api/a → 503', 'GET /api/b → 404'],
+    );
+  });
+
+  test('calls without an error object are all kept as breadcrumbs', async () => {
+    const { reporter, requests } = setUp();
+    reporter.reportHttpError({ method: 'GET', urlTemplate: '/api/items', status: 404 });
+    reporter.reportHttpError({ method: 'GET', urlTemplate: '/api/items', status: 404 });
+    reporter.captureMessage('later failure');
+    await reporter.flush();
+    assert.equal(requests[0].body.context.breadcrumbs.length, 2);
+  });
+});
+
+describe('uncaught errors the HTTP layer has seen', () => {
+  test('are not reported, whatever the HTTP layer decided about them', async () => {
+    const { reporter, requests, goOffline, goOnline } = setUp();
+    const clientFailure = new Error('ApiError 422');
+    const serverFailure = new Error('ApiError 500');
+    const offlineFailure = new TypeError('Failed to fetch');
+    reporter.reportHttpError({
+      method: 'POST',
+      urlTemplate: '/api/a',
+      status: 422,
+      error: clientFailure,
+    });
+    reporter.reportHttpError({
+      method: 'POST',
+      urlTemplate: '/api/b',
+      status: 500,
+      error: serverFailure,
+    });
+    goOffline();
+    reporter.reportHttpError({
+      method: 'GET',
+      urlTemplate: '/api/c',
+      status: 0,
+      error: offlineFailure,
+    });
+    goOnline();
+
+    assert.equal(reporter.captureUncaughtError(clientFailure), false);
+    assert.equal(reporter.captureUncaughtError(serverFailure), false);
+    assert.equal(reporter.captureUncaughtError(offlineFailure), false);
+    await reporter.flush();
+    assert.deepEqual(
+      requests.map((request) => request.body.error.code),
+      ['HTTP_500'],
+    );
+  });
+
+  test('other uncaught errors are reported like captureException', async () => {
+    const { reporter, requests } = setUp();
+    const uncaught = new RangeError('bad index');
+    assert.equal(reporter.captureUncaughtError(uncaught, { tags: { mechanism: 'test' } }), true);
+    assert.equal(reporter.captureUncaughtError(uncaught), false);
+    assert.equal(reporter.captureUncaughtError('a thrown string'), true);
+    await reporter.flush();
+    assert.deepEqual(
+      requests.map((request) => request.body.error.message),
+      ['bad index', 'a thrown string'],
+    );
+    assert.deepEqual(requests[0].body.context.tags, { mechanism: 'test' });
+  });
+
+  test('a startup failure is reported unless the HTTP layer reported it or it happened offline', async () => {
+    const { reporter, requests, goOffline, goOnline } = setUp();
+    const clientFailure = new Error('ApiError 401');
+    const serverFailure = new Error('ApiError 503');
+    const onlineNetworkFailure = new TypeError('Failed to fetch');
+    const offlineNetworkFailure = new TypeError('Failed to fetch');
+    const reportsBackendFailure = new TypeError('Failed to fetch');
+    const unrelatedFailure = new RangeError('bad config');
+    const startup = { action: 'bootstrap', severity: 'critical' };
+    reporter.reportHttpError({ urlTemplate: '/api/me', status: 401, error: clientFailure });
+    reporter.reportHttpError({ urlTemplate: '/api/config', status: 503, error: serverFailure });
+    reporter.reportHttpError({ urlTemplate: '/api/a', status: 0, error: onlineNetworkFailure });
+    reporter.reportHttpError({
+      url: `${VALID_OPTIONS.url}/api/v1/ingest`,
+      status: 0,
+      error: reportsBackendFailure,
+    });
+    goOffline();
+    reporter.reportHttpError({ urlTemplate: '/api/b', status: 0, error: offlineNetworkFailure });
+    goOnline();
+
+    assert.equal(reporter.captureStartupFailure(clientFailure, startup), true);
+    assert.equal(reporter.captureStartupFailure(serverFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(onlineNetworkFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(offlineNetworkFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(reportsBackendFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(unrelatedFailure, startup), true);
+    assert.equal(reporter.captureStartupFailure(unrelatedFailure, startup), false);
+    await reporter.flush();
+
+    assert.deepEqual(
+      requests.map(({ body }) => [body.error.message, body.error.severity, body.error.action]),
+      [
+        ['/api/config failed with HTTP 503', 'error', '/api/config'],
+        ['/api/a failed: network error', 'warning', '/api/a'],
+        ['ApiError 401', 'critical', 'bootstrap'],
+        ['bad config', 'critical', 'bootstrap'],
+      ],
+    );
+  });
+
+  test('an explicit captureException still reports a 4xx error the HTTP layer only saw', async () => {
+    const { reporter, requests } = setUp();
+    const clientFailure = new Error('ApiError 409');
+    reporter.reportHttpError({
+      method: 'PUT',
+      urlTemplate: '/api/a',
+      status: 409,
+      error: clientFailure,
+    });
+    assert.equal(reporter.captureException(clientFailure, { code: 'CONFLICT' }), true);
+    await reporter.flush();
+    assert.equal(requests[0].body.error.code, 'CONFLICT');
+  });
 });
 
 describe('toUrlTemplate', () => {

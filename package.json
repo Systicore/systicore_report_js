@@ -1,6 +1,6 @@
 {
   "name": "@systicore/report",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser error reporting client for the Systicore reports backend: build-free ESM, zero dependencies.",
   "private": true,
   "license": "UNLICENSED",
@@ -9,7 +9,11 @@
     "url": "git+https://github.com/Systicore/systicore_report_js.git"
   },
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./src/facade.js",
+    "./src/angular.js",
+    "./src/vue.js"
+  ],
   "main": "./src/index.js",
   "types": "./index.d.ts",
   "exports": {

@@ -27,6 +27,8 @@ const ENABLED_WORDS = new Set(['true', '1', 'yes', 'on']);
  * @property {{ version?: string, commit?: string, buildTime?: string }} release
  * @property {(() => unknown) | undefined} userProvider
  * @property {(() => unknown) | undefined} routeProvider
+ * @property {(() => unknown) | undefined} breadcrumbsProvider
+ * @property {Record<string, unknown> | undefined} tags added to every event, a copy taken at init()
  * @property {((event: import('./event-builder.js').IngestEvent) => unknown) | undefined} beforeSend
  * @property {number} maxQueue
  * @property {number} rateLimitPerMinute
@@ -71,6 +73,8 @@ export function resolveConfiguration(options) {
       release: resolveRelease(settings.release),
       userProvider: functionOrUndefined(settings.userProvider),
       routeProvider: functionOrUndefined(settings.routeProvider),
+      breadcrumbsProvider: functionOrUndefined(settings.breadcrumbsProvider),
+      tags: copyOfTags(settings.tags),
       beforeSend: functionOrUndefined(settings.beforeSend),
       maxQueue: boundedInteger(settings.maxQueue, DEFAULT_MAX_QUEUE, MAX_QUEUE_UPPER_BOUND),
       rateLimitPerMinute: boundedInteger(
@@ -138,6 +142,20 @@ function resolveRelease(release) {
  */
 function functionOrUndefined(value) {
   return typeof value === 'function' ? /** @type {T} */ (value) : undefined;
+}
+
+/**
+ * A shallow copy of the global tags, so the app changing its object later
+ * does not change what is sent. Values are checked when an event is built.
+ *
+ * @param {unknown} tags
+ * @returns {Record<string, unknown> | undefined}
+ */
+function copyOfTags(tags) {
+  if (typeof tags !== 'object' || tags === null || Array.isArray(tags)) {
+    return undefined;
+  }
+  return Object.fromEntries(Object.entries(tags));
 }
 
 /**

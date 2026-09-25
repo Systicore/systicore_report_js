@@ -329,6 +329,125 @@ describe('user attribution', () => {
   });
 });
 
+describe('global tags', () => {
+  test('are added to every event; a capture wins a key clash', async () => {
+    const globalTags = { image: 'tarp-planner_web:1.4.2', feature: 'global', empty: null };
+    const { reporter, requests } = setUp({ tags: globalTags });
+    reporter.captureMessage('first');
+    globalTags.image = 'changed after init';
+    reporter.captureMessage('second', { tags: { feature: 'vault', attempt: 2 } });
+    await reporter.flush();
+
+    assert.deepEqual(requests[0].body.context.tags, {
+      image: 'tarp-planner_web:1.4.2',
+      feature: 'global',
+    });
+    assert.deepEqual(requests[1].body.context.tags, {
+      feature: 'vault',
+      attempt: '2',
+      image: 'tarp-planner_web:1.4.2',
+    });
+  });
+
+  test("the capture's own tags are kept first under the 10-tag limit", async () => {
+    const globalTags = Object.fromEntries(
+      Array.from({ length: 10 }, (_, index) => [`global${index}`, 'g']),
+    );
+    const { reporter, requests } = setUp({ tags: globalTags });
+    reporter.captureMessage('boom', { tags: { mechanism: 'window.error' } });
+    await reporter.flush();
+
+    const sentKeys = Object.keys(requests[0].body.context.tags);
+    assert.equal(sentKeys.length, 10);
+    assert.equal(sentKeys[0], 'mechanism');
+    assert.ok(!sentKeys.includes('global9'));
+  });
+
+  test('ignore anything that is not a plain object', async () => {
+    const { reporter, requests } = setUp({ tags: ['not', 'tags'] });
+    reporter.captureMessage('boom');
+    await reporter.flush();
+    assert.equal(requests[0].body.context.tags, undefined);
+  });
+});
+
+describe('breadcrumbsProvider', () => {
+  test('is read at capture time and merged with the trail by time', async () => {
+    /** @type {Array<unknown>} */
+    const sessionSteps = [];
+    const harness = setUp({ breadcrumbsProvider: () => sessionSteps });
+    const { reporter, requests, clock } = harness;
+    sessionSteps.push({ category: 'ui', message: 'opened planner', ts: clock.now });
+    await clock.advance(1_000);
+    reporter.addBreadcrumb({ category: 'nav', message: '/plans' });
+    await clock.advance(1_000);
+    sessionSteps.push({ message: 'saved plan', ts: new Date(clock.now).toISOString() });
+    sessionSteps.push('picked a date');
+    reporter.captureMessage('boom');
+    await reporter.flush();
+
+    assert.deepEqual(requests[0].body.context.breadcrumbs, [
+      { ts: '2026-09-24T10:00:00.000Z', category: 'ui', message: 'opened planner' },
+      { ts: '2026-09-24T10:00:01.000Z', category: 'nav', message: '/plans' },
+      { ts: '2026-09-24T10:00:02.000Z', category: 'log', message: 'saved plan' },
+      { ts: '2026-09-24T10:00:02.000Z', category: 'log', message: 'picked a date' },
+    ]);
+  });
+
+  test('only the newest 20 of trail and provided steps are sent', async () => {
+    const providedSteps = Array.from({ length: 500 }, (_, index) => ({
+      message: `step ${index}`,
+      ts: index,
+    }));
+    const { reporter, requests } = setUp({ breadcrumbsProvider: () => providedSteps });
+    reporter.addBreadcrumb('newest');
+    reporter.captureMessage('boom');
+    await reporter.flush();
+
+    const messages = requests[0].body.context.breadcrumbs.map((breadcrumb) => breadcrumb.message);
+    assert.equal(messages.length, 20);
+    assert.equal(messages[0], 'step 481');
+    assert.equal(messages.at(-1), 'newest');
+  });
+
+  test('entries without a message or a valid time are skipped or get the capture time', async () => {
+    const { reporter, requests } = setUp({
+      breadcrumbsProvider: () => [null, { category: 'ui' }, { message: 'no time', ts: 'soon' }],
+    });
+    reporter.captureMessage('boom');
+    await reporter.flush();
+    assert.deepEqual(requests[0].body.context.breadcrumbs, [
+      { ts: '2026-09-24T10:00:00.000Z', category: 'log', message: 'no time' },
+    ]);
+  });
+
+  test('a throwing provider or unreadable entries do not stop the report', async () => {
+    const hostileEntry = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('trap');
+        },
+      },
+    );
+    for (const breadcrumbsProvider of [
+      () => {
+        throw new Error('logger not ready');
+      },
+      () => [hostileEntry],
+    ]) {
+      const { reporter, requests } = setUp({ breadcrumbsProvider });
+      reporter.addBreadcrumb('kept');
+      assert.equal(reporter.captureMessage('boom'), true);
+      await reporter.flush();
+      assert.deepEqual(
+        requests[0].body.context.breadcrumbs.map((breadcrumb) => breadcrumb.message),
+        ['kept'],
+      );
+    }
+  });
+});
+
 describe('beforeSend', () => {
   test('can change the event, and its result is limited again', async () => {
     const { reporter, requests } = setUp({
