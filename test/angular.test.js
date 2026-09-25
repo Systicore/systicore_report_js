@@ -6,7 +6,7 @@ import {
   isHttpErrorResponse,
   reportHttpErrorResponse,
 } from '../src/angular.js';
-import { flush, init } from '../src/index.js';
+import { captureMessage, flush, init, reportHttpError } from '../src/index.js';
 import { VALID_OPTIONS, createFetchRecorder } from './support/fake-runtime.js';
 
 /** The fields of Angular's HttpErrorResponse the adapter reads. */
@@ -128,6 +128,32 @@ describe('Angular adapter', () => {
     new ReportingErrorHandler().handleError(response);
     await flush();
     assert.equal(recorder.requests.length, 1);
+  });
+
+  test('a 4xx seen by the interceptor and the ErrorHandler leaves one breadcrumb', async () => {
+    const response = httpErrorResponse(404, 'https://api.example/api/products/topps-chrome');
+    reportHttpErrorResponse(response, { method: 'GET', url: '/api/products/topps-chrome' });
+    new ReportingErrorHandler().handleError(response);
+    captureMessage('later failure');
+    await flush();
+
+    assert.equal(recorder.requests.length, 1);
+    assert.deepEqual(
+      recorder.requests[0].body.context.breadcrumbs.map((breadcrumb) => breadcrumb.message),
+      ['GET /api/products/topps-chrome → 404'],
+    );
+  });
+
+  test('an error the app passed to reportHttpError is logged but not reported again', async () => {
+    const consoleError = /** @type {any} */ (console.error);
+    consoleError.mock.resetCalls();
+    const apiError = Object.assign(new Error('Validation failed'), { status: 422 });
+    reportHttpError({ method: 'POST', urlTemplate: '/api/items', status: 422, error: apiError });
+    new ReportingErrorHandler().handleError(apiError);
+    await flush();
+
+    assert.equal(recorder.requests.length, 0);
+    assert.deepEqual(consoleError.mock.calls[0].arguments, ['ERROR', apiError]);
   });
 
   test('reportHttpErrorResponse ignores anything that is not an HttpErrorResponse', () => {

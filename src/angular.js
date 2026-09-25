@@ -9,7 +9,7 @@
  * arguments.
  */
 
-import { captureException, reportHttpError } from './facade.js';
+import { captureUncaughtError, reportHttpError } from './facade.js';
 
 const ANGULAR_ERROR_HANDLER_MECHANISM = 'angular.ErrorHandler';
 
@@ -21,7 +21,8 @@ const REQUEST_ID_HEADERS = ['X-Request-Id', 'X-Correlation-Id'];
  * handler (console.error('ERROR', error)) and reports the error. With
  * provideBrowserGlobalErrorListeners() (zoneless apps) this also covers
  * uncaught errors and unhandled rejections, so installGlobalHandlers() is
- * not needed.
+ * not needed. An error object the app already passed to reportHttpError is
+ * logged but not reported again.
  */
 export class ReportingErrorHandler {
   /**
@@ -38,7 +39,7 @@ export class ReportingErrorHandler {
       reportHttpErrorResponse(unwrapped);
       return;
     }
-    captureException(unwrapped, { tags: { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM } });
+    captureUncaughtError(unwrapped, { tags: { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM } });
   }
 }
 

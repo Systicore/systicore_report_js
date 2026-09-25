@@ -93,6 +93,19 @@ describe('public API', () => {
     reinstalled();
   });
 
+  test('installGlobalHandlers skips a rejection the app passed to reportHttpError', async () => {
+    const uninstall = installGlobalHandlers();
+    const apiError = Object.assign(new Error('Not found'), { status: 404 });
+    reportHttpError({ method: 'GET', urlTemplate: '/api/items/:id', status: 404, error: apiError });
+    const countBefore = recorder.requests.length;
+    windowTarget.dispatchEvent(
+      Object.assign(new Event('unhandledrejection'), { reason: apiError }),
+    );
+    await flush();
+    assert.equal(recorder.requests.length, countBefore);
+    uninstall();
+  });
+
   test('never throws, whatever is passed', async () => {
     const hostile = new Proxy(
       {},

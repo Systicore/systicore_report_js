@@ -58,6 +58,19 @@ export function captureException(error, options) {
 }
 
 /**
+ * For the handlers of uncaught errors (window listeners, the Angular and Vue
+ * adapters): like captureException, but skips an error object the app
+ * already passed to reportHttpError. Not part of the public API.
+ *
+ * @param {unknown} error
+ * @param {CaptureOptions} [options]
+ * @returns {boolean} true when the event was queued for delivery
+ */
+export function captureUncaughtError(error, options) {
+  return dispatch((reporter) => reporter.captureUncaughtError(error, options));
+}
+
+/**
  * @param {string} message
  * @param {CaptureOptions} [options]
  * @returns {boolean}
@@ -113,7 +126,7 @@ export function installGlobalHandlers() {
   let removeListeners = () => {};
   try {
     removeListeners = installWindowErrorHandlers(detectRuntime().windowTarget, (error, mechanism) =>
-      captureException(error, { tags: { mechanism } }),
+      captureUncaughtError(error, { tags: { mechanism } }),
     );
   } catch {
     // No usable window: nothing to listen to.

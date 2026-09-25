@@ -131,7 +131,14 @@ export interface HttpErrorDetails {
   /** HTTP status; 0, null or undefined for a network failure. */
   status?: number | null | undefined;
   requestId?: string | null | undefined;
-  /** The error object of the failure; the same object is never reported twice. */
+  /**
+   * The error object the app throws for this failure (the fetch TypeError,
+   * its own ApiError, Angular's HttpErrorResponse). It is remembered whether
+   * or not it is reported: passing it again adds nothing, and the handlers of
+   * uncaught errors (installGlobalHandlers, the Angular and Vue adapters) do
+   * not report it when the app lets it escape. Explicit captureException()
+   * calls still report a 4xx error.
+   */
   error?: unknown;
 }
 
@@ -163,7 +170,8 @@ export declare function captureMessage(message: string, options?: CaptureMessage
 /**
  * Reports a failed HTTP call of the app when it is a server fault (status >=
  * 500) or a network failure while online. Every call becomes an "http"
- * breadcrumb. Never throws.
+ * breadcrumb, except a second call with the same `error` object, which is
+ * ignored. Never throws.
  * @returns true when an event was queued for delivery
  */
 export declare function reportHttpError(details: HttpErrorDetails): boolean;
@@ -181,7 +189,8 @@ export declare function flush(): Promise<void>;
 
 /**
  * Reports uncaught errors ('error') and unhandled promise rejections
- * ('unhandledrejection') of the window. Idempotent.
+ * ('unhandledrejection') of the window, except error objects the app already
+ * passed to reportHttpError. Idempotent.
  * @returns a function that removes the listeners
  */
 export declare function installGlobalHandlers(): () => void;

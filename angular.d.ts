@@ -20,7 +20,8 @@ export interface HttpErrorResponseLike {
 /**
  * Drop-in ErrorHandler: `{ provide: ErrorHandler, useClass: ReportingErrorHandler }`.
  * Logs like Angular's default handler and reports the error; an
- * HttpErrorResponse is reported only for status >= 500 or 0.
+ * HttpErrorResponse is reported only for status >= 500 or 0, and an error
+ * object the app already passed to reportHttpError is not reported again.
  */
 export declare class ReportingErrorHandler {
   handleError(error: unknown): void;

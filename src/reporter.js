@@ -49,6 +49,7 @@ import {
  * @typedef {object} Reporter
  * @property {boolean} enabled
  * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureException
+ * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureUncaughtError
  * @property {(message: unknown, options?: CaptureOptions | null) => boolean} captureMessage
  * @property {(details: import('./http-failure.js').HttpFailureDetails) => boolean} reportHttpError
  * @property {(user: { id?: unknown, issuer?: unknown } | null | undefined) => void} setUser
@@ -87,6 +88,10 @@ export class DisabledReporter {
     return false;
   }
 
+  captureUncaughtError() {
+    return false;
+  }
+
   captureMessage() {
     return false;
   }
@@ -121,6 +126,12 @@ export class ActiveReporter {
   #explicitUser = null;
   /** Error objects already reported, so one error seen by two handlers is sent once. */
   #reportedErrors = new WeakSet();
+  /**
+   * Every error object passed to reportHttpError, reported or not. The HTTP
+   * layer has decided about each of them, so a second pass and the handlers
+   * of uncaught errors leave them alone.
+   */
+  #httpErrors = new WeakSet();
 
   /**
    * @param {import('./configuration.js').Configuration} configuration
@@ -185,6 +196,29 @@ export class ActiveReporter {
   }
 
   /**
+   * Reports an error nobody handled: from the window listeners or a
+   * framework's error handler. An error object the app passed to
+   * reportHttpError is skipped, because the HTTP layer already reported it or
+   * decided it is not worth a report (a 4xx, a network failure while
+   * offline). Explicit captureException() calls are not affected.
+   *
+   * @param {unknown} error
+   * @param {CaptureOptions | null} [options]
+   * @returns {boolean} true when the event was queued for delivery
+   */
+  captureUncaughtError(error, options) {
+    try {
+      if (canBeRemembered(error) && this.#httpErrors.has(error)) {
+        return false;
+      }
+      return this.captureException(error, options);
+    } catch (failure) {
+      this.#logger.warn('captureUncaughtError failed', failure);
+      return false;
+    }
+  }
+
+  /**
    * @param {unknown} message
    * @param {CaptureOptions | null} [options]
    * @returns {boolean}
@@ -211,7 +245,9 @@ export class ActiveReporter {
   /**
    * Reports a failed HTTP call of the app when it is a server fault (>= 500)
    * or a network failure while online. Every call, reported or not, becomes
-   * an "http" breadcrumb.
+   * an "http" breadcrumb. An error object passed a second time (the same
+   * failure seen by an interceptor and then by the ErrorHandler) is ignored
+   * entirely: no second report and no second breadcrumb.
    *
    * @param {import('./http-failure.js').HttpFailureDetails} details
    * @returns {boolean}
@@ -219,6 +255,9 @@ export class ActiveReporter {
   reportHttpError(details) {
     try {
       const httpFailure = details ?? {};
+      if (!this.#rememberHttpError(httpFailure.error)) {
+        return false;
+      }
       const call = describeHttpCall(httpFailure);
       if (call.target?.startsWith(this.#configuration.url)) {
         return false;
@@ -375,13 +414,31 @@ export class ActiveReporter {
    * @returns {boolean}
    */
   #claimReport(error) {
-    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    if (!canBeRemembered(error)) {
       return true;
     }
     if (this.#reportedErrors.has(error)) {
       return false;
     }
     this.#reportedErrors.add(error);
+    return true;
+  }
+
+  /**
+   * Remembers `error` as seen by the HTTP layer. Returns false when it
+   * already was. Primitive values and a missing error always pass.
+   *
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  #rememberHttpError(error) {
+    if (!canBeRemembered(error)) {
+      return true;
+    }
+    if (this.#httpErrors.has(error)) {
+      return false;
+    }
+    this.#httpErrors.add(error);
     return true;
   }
 
@@ -395,4 +452,15 @@ export class ActiveReporter {
     }
     return new IndexedDbStore(this.#runtime.indexedDB, queueDatabaseName(source));
   }
+}
+
+/**
+ * Whether `value` can be kept in a WeakSet: objects and functions can,
+ * primitives (a thrown string, undefined) cannot.
+ *
+ * @param {unknown} value
+ * @returns {value is object}
+ */
+function canBeRemembered(value) {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
 }

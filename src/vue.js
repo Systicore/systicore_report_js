@@ -6,10 +6,12 @@
  *
  * Reports every error Vue catches (render, watchers, lifecycle hooks, event
  * handlers) and then runs the handler that was installed before, so an
- * existing app.config.errorHandler keeps working.
+ * existing app.config.errorHandler keeps working. An error object the app
+ * already passed to reportHttpError (the ApiError of a 4xx, say) is not
+ * reported again; the previous handler still runs.
  */
 
-import { captureException } from './facade.js';
+import { captureUncaughtError } from './facade.js';
 
 const VUE_ERROR_HANDLER_MECHANISM = 'vue.errorHandler';
 
@@ -43,7 +45,7 @@ export function installVueErrorHandler(app) {
 
   /** @type {VueErrorHandler} */
   const reportingHandler = function reportingHandler(error, instance, info) {
-    captureException(error, {
+    captureUncaughtError(error, {
       route: routeTemplateOf(instance),
       tags: {
         mechanism: VUE_ERROR_HANDLER_MECHANISM,
