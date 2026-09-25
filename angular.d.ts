@@ -47,6 +47,27 @@ export declare class ReportingErrorHandler {
   handleError(error: unknown): void;
 }
 
+/**
+ * Runs Angular's bootstrap so that a failed start is reported as critical:
+ *
+ * ```ts
+ * bootstrapWithReporting(() => bootstrapApplication(App, appConfig)).catch((error) =>
+ *   console.error(error),
+ * );
+ * ```
+ *
+ * Angular reports an app-initializer or root-component failure to the
+ * ErrorHandler before the bootstrap promise rejects. While `bootstrap` runs,
+ * ReportingErrorHandler therefore reports with action "bootstrap" and
+ * severity "critical"; the rejection is reported too when the ErrorHandler
+ * did not report it (thrown before the ErrorHandler exists, or an HTTP 4xx).
+ * An error a `beforeHandle` hook skipped or handled is left alone.
+ * @returns a promise that settles like the bootstrap's own
+ */
+export declare function bootstrapWithReporting<Result>(
+  bootstrap: () => Result | PromiseLike<Result>,
+): Promise<Result>;
+
 /** True for Angular's HttpErrorResponse (checked by shape). */
 export declare function isHttpErrorResponse(value: unknown): value is HttpErrorResponseLike;
 

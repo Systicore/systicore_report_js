@@ -3,6 +3,7 @@ import { after, afterEach, before, beforeEach, describe, mock, test } from 'node
 
 import {
   ReportingErrorHandler,
+  bootstrapWithReporting,
   isHttpErrorResponse,
   reportHttpErrorResponse,
 } from '../src/angular.js';
@@ -240,6 +241,97 @@ describe('Angular adapter', () => {
       recorder.requests.map((request) => request.body.error.message),
       ['real failure'],
     );
+  });
+
+  describe('bootstrapWithReporting', () => {
+    /**
+     * What Angular's bootstrap does with an app-initializer failure: hand it
+     * to the ErrorHandler, then reject with it.
+     */
+    function failingBootstrap(handler, failure) {
+      return async () => {
+        await Promise.resolve();
+        handler.handleError(failure);
+        throw failure;
+      };
+    }
+
+    test('an error the ErrorHandler sees while bootstrapping is sent once, as critical', async () => {
+      const handler = new ReportingErrorHandler();
+      const failure = new Error('APP_INITIALIZER failed');
+      await assert.rejects(
+        bootstrapWithReporting(failingBootstrap(handler, failure)),
+        (error) => error === failure,
+      );
+      handler.handleError(new Error('after bootstrap'));
+      await flush();
+
+      assert.deepEqual(
+        recorder.requests.map(({ body }) => [
+          body.error.message,
+          body.error.severity,
+          body.error.action,
+        ]),
+        [
+          ['APP_INITIALIZER failed', 'critical', 'bootstrap'],
+          ['after bootstrap', 'error', undefined],
+        ],
+      );
+      assert.deepEqual(recorder.requests[0].body.context.tags, {
+        mechanism: 'angular.ErrorHandler',
+      });
+    });
+
+    test('a failure before the ErrorHandler exists is reported by the helper', async () => {
+      const failure = new TypeError('environment initializer failed');
+      await assert.rejects(
+        bootstrapWithReporting(() => {
+          throw failure;
+        }),
+        (error) => error === failure,
+      );
+      await flush();
+
+      assert.equal(recorder.requests.length, 1);
+      const { error, context } = recorder.requests[0].body;
+      assert.deepEqual(
+        [error.type, error.severity, error.action],
+        ['TypeError', 'critical', 'bootstrap'],
+      );
+      assert.equal(context?.tags, undefined);
+    });
+
+    test('a 4xx that stops the bootstrap is reported as critical', async () => {
+      const handler = new ReportingErrorHandler();
+      const response = httpErrorResponse(404, 'https://api.example/api/config');
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, response)));
+      await flush();
+
+      assert.equal(recorder.requests.length, 1);
+      assert.equal(recorder.requests[0].body.error.type, 'HttpErrorResponse');
+      assert.equal(recorder.requests[0].body.error.severity, 'critical');
+    });
+
+    test('an error a beforeHandle hook handled is not reported by the helper', async () => {
+      const handler = new ReportingErrorHandler({ beforeHandle: () => 'handled' });
+      const chunkLoadError = Object.assign(new Error('Loading chunk 1 failed'), {
+        name: 'ChunkLoadError',
+      });
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, chunkLoadError)));
+      await flush();
+      assert.equal(recorder.requests.length, 0);
+    });
+
+    test('resolves with the result of the bootstrap', async () => {
+      const applicationReference = { destroy() {} };
+      assert.equal(
+        await bootstrapWithReporting(async () => applicationReference),
+        applicationReference,
+      );
+      new ReportingErrorHandler().handleError(new Error('while running'));
+      await flush();
+      assert.equal(recorder.requests[0].body.error.severity, 'error');
+    });
   });
 
   test('reportHttpErrorResponse ignores anything that is not an HttpErrorResponse', () => {

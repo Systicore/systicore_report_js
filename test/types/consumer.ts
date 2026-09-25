@@ -18,6 +18,7 @@ import {
 } from '@systicore/report';
 import {
   ReportingErrorHandler,
+  bootstrapWithReporting,
   isHttpErrorResponse,
   reportHttpErrorResponse,
   type ErrorHandlingDecision,
@@ -94,6 +95,13 @@ class AppErrorHandler extends ReportingErrorHandler {
 const subclassedHandler: ReportingErrorHandler = new AppErrorHandler();
 // @ts-expect-error the decision is a closed set
 new ReportingErrorHandler({ beforeHandle: () => 'ignore' });
+
+interface ApplicationRefLike {
+  destroy(): void;
+}
+declare function bootstrapApplication(): Promise<ApplicationRefLike>;
+const started: Promise<ApplicationRefLike> = bootstrapWithReporting(() => bootstrapApplication());
+started.catch((error: unknown) => console.error(error));
 void hookedHandler;
 void subclassedHandler;
 const failure: unknown = { name: 'HttpErrorResponse', status: 500, url: null };

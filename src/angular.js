@@ -9,11 +9,29 @@
  * required arguments; apps that need a hook construct it themselves:
  *
  *   { provide: ErrorHandler, useFactory: () => new ReportingErrorHandler({ beforeHandle }) }
+ *
+ * and bootstrapWithReporting() around bootstrapApplication(), so a failed
+ * start is reported as critical.
  */
 
-import { captureUncaughtError, reportHttpError } from './facade.js';
+import { captureException, captureUncaughtError, reportHttpError } from './facade.js';
 
 const ANGULAR_ERROR_HANDLER_MECHANISM = 'angular.ErrorHandler';
+
+/** How a failure during bootstrapWithReporting() is reported. */
+const BOOTSTRAP_CAPTURE_OPTIONS = Object.freeze({ action: 'bootstrap', severity: 'critical' });
+
+/**
+ * How many bootstrapWithReporting() calls are waiting for Angular. While one
+ * is, ReportingErrorHandler reports with BOOTSTRAP_CAPTURE_OPTIONS.
+ */
+let pendingBootstraps = 0;
+
+/**
+ * Error objects a beforeHandle hook kept from being reported ("skip" or
+ * "handled"), so bootstrapWithReporting() does not report them either.
+ */
+const errorsKeptFromReporting = new WeakSet();
 
 /** Response headers that carry the backend's request id, first match wins. */
 const REQUEST_ID_HEADERS = ['X-Request-Id', 'X-Correlation-Id'];
@@ -66,6 +84,9 @@ export class ReportingErrorHandler {
   handleError(error) {
     const unwrapped = unwrapZoneRejection(error);
     const decision = this.#decide(unwrapped);
+    if (decision !== REPORT && typeof unwrapped === 'object' && unwrapped !== null) {
+      errorsKeptFromReporting.add(unwrapped);
+    }
     if (decision === HANDLED) {
       return;
     }
@@ -81,7 +102,11 @@ export class ReportingErrorHandler {
       reportHttpErrorResponse(unwrapped);
       return;
     }
-    captureUncaughtError(unwrapped, { tags: { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM } });
+    const tags = { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM };
+    captureUncaughtError(
+      unwrapped,
+      pendingBootstraps > 0 ? { ...BOOTSTRAP_CAPTURE_OPTIONS, tags } : { tags },
+    );
   }
 
   /**
@@ -101,6 +126,42 @@ export class ReportingErrorHandler {
     } catch {
       return REPORT;
     }
+  }
+}
+
+/**
+ * Runs Angular's bootstrap so that a failed start is reported as critical:
+ *
+ *   bootstrapWithReporting(() => bootstrapApplication(App, appConfig))
+ *     .catch((error) => console.error(error));
+ *
+ * Angular hands an app-initializer or root-component failure to the
+ * ErrorHandler before the bootstrap promise rejects, so by the time a
+ * .catch() runs the error has already been reported at the default
+ * severity. While `bootstrap` runs, ReportingErrorHandler therefore reports
+ * with action "bootstrap" and severity "critical". The rejection itself is
+ * reported here as well, which covers failures thrown before the
+ * ErrorHandler exists and HTTP 4xx failures the ErrorHandler only keeps as
+ * breadcrumbs; one error object is still sent once, and an error a
+ * beforeHandle hook skipped or handled is left alone. The returned promise
+ * settles like the bootstrap's own.
+ *
+ * @template Result
+ * @param {() => Result | PromiseLike<Result>} bootstrap
+ * @returns {Promise<Result>}
+ */
+export async function bootstrapWithReporting(bootstrap) {
+  pendingBootstraps += 1;
+  try {
+    return await bootstrap();
+  } catch (error) {
+    const unwrapped = unwrapZoneRejection(error);
+    if (!errorsKeptFromReporting.has(/** @type {object} */ (unwrapped))) {
+      captureException(unwrapped, BOOTSTRAP_CAPTURE_OPTIONS);
+    }
+    throw error;
+  } finally {
+    pendingBootstraps -= 1;
   }
 }
 
