@@ -156,6 +156,92 @@ describe('Angular adapter', () => {
     assert.deepEqual(consoleError.mock.calls[0].arguments, ['ERROR', apiError]);
   });
 
+  test('beforeHandle runs first; "handled" stops logging and reporting', async () => {
+    const consoleError = /** @type {any} */ (console.error);
+    consoleError.mock.resetCalls();
+    const steps = [];
+    const chunkLoadError = Object.assign(new Error('Loading chunk 7 failed'), {
+      name: 'ChunkLoadError',
+    });
+    const handler = new ReportingErrorHandler({
+      beforeHandle: (error) => {
+        steps.push(['beforeHandle', error, consoleError.mock.callCount()]);
+        return 'handled';
+      },
+    });
+    handler.handleError(
+      Object.assign(new Error('Uncaught (in promise)'), { rejection: chunkLoadError }),
+    );
+    await flush();
+
+    assert.deepEqual(steps, [['beforeHandle', chunkLoadError, 0]]);
+    assert.equal(consoleError.mock.callCount(), 0);
+    assert.equal(recorder.requests.length, 0);
+  });
+
+  test('"skip" logs the error but does not report it', async () => {
+    const consoleError = /** @type {any} */ (console.error);
+    consoleError.mock.resetCalls();
+    const error = new Error('ExpressionChangedAfterItHasBeenChecked');
+    new ReportingErrorHandler({ beforeHandle: () => 'skip' }).handleError(error);
+    new ReportingErrorHandler({ beforeHandle: () => 'skip' }).handleError(
+      httpErrorResponse(503, 'https://api.example/api/items'),
+    );
+    await flush();
+
+    assert.deepEqual(consoleError.mock.calls[0].arguments, ['ERROR', error]);
+    assert.equal(recorder.requests.length, 0);
+  });
+
+  test('"report", no decision, an unknown value or a throwing hook report as before', async () => {
+    const hooks = [
+      () => 'report',
+      () => undefined,
+      () => 'later',
+      () => {
+        throw new Error('hook bug');
+      },
+    ];
+    for (const [index, beforeHandle] of hooks.entries()) {
+      new ReportingErrorHandler({ beforeHandle }).handleError(new Error(`failure ${index}`));
+    }
+    new ReportingErrorHandler(null).handleError(new Error('without options'));
+    await flush();
+
+    assert.deepEqual(
+      recorder.requests.map((request) => request.body.error.message),
+      ['failure 0', 'failure 1', 'failure 2', 'failure 3', 'without options'],
+    );
+  });
+
+  test('a subclass can act first and then hand over to the reporting handler', async () => {
+    class AppErrorHandler extends ReportingErrorHandler {
+      reloads = 0;
+
+      /** @param {unknown} error */
+      handleError(error) {
+        if (error instanceof Error && error.name === 'ChunkLoadError') {
+          this.reloads += 1;
+          return;
+        }
+        super.handleError(error);
+      }
+    }
+    assert.equal(AppErrorHandler.length, 0);
+    const handler = new AppErrorHandler();
+    handler.handleError(
+      Object.assign(new Error('Loading chunk 3 failed'), { name: 'ChunkLoadError' }),
+    );
+    handler.handleError(new Error('real failure'));
+    await flush();
+
+    assert.equal(handler.reloads, 1);
+    assert.deepEqual(
+      recorder.requests.map((request) => request.body.error.message),
+      ['real failure'],
+    );
+  });
+
   test('reportHttpErrorResponse ignores anything that is not an HttpErrorResponse', () => {
     assert.equal(reportHttpErrorResponse(new Error('plain')), false);
     assert.equal(reportHttpErrorResponse(null), false);

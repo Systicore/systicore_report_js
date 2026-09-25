@@ -5,8 +5,10 @@
  *   { provide: ErrorHandler, useClass: ReportingErrorHandler }
  *
  * plus reportHttpErrorResponse() for an HttpInterceptorFn. Angular's DI can
- * construct ReportingErrorHandler because its constructor takes no
- * arguments.
+ * construct ReportingErrorHandler because its constructor declares no
+ * required arguments; apps that need a hook construct it themselves:
+ *
+ *   { provide: ErrorHandler, useFactory: () => new ReportingErrorHandler({ beforeHandle }) }
  */
 
 import { captureUncaughtError, reportHttpError } from './facade.js';
@@ -17,6 +19,25 @@ const ANGULAR_ERROR_HANDLER_MECHANISM = 'angular.ErrorHandler';
 const REQUEST_ID_HEADERS = ['X-Request-Id', 'X-Correlation-Id'];
 
 /**
+ * What a beforeHandle hook decides about an error: "report" logs and
+ * reports it (the default), "skip" only logs it, and "handled" means the
+ * hook took care of it, so it is neither logged nor reported.
+ *
+ * @typedef {'report' | 'skip' | 'handled'} ErrorHandlingDecision
+ */
+
+const REPORT = 'report';
+const SKIP = 'skip';
+const HANDLED = 'handled';
+
+/**
+ * @typedef {object} ReportingErrorHandlerOptions
+ * @property {(error: unknown) => unknown} [beforeHandle] runs first for every
+ *   error, with a Zone.js promise rejection unwrapped; returns an
+ *   ErrorHandlingDecision
+ */
+
+/**
  * Drop-in replacement for Angular's ErrorHandler: logs like the default
  * handler (console.error('ERROR', error)) and reports the error. With
  * provideBrowserGlobalErrorListeners() (zoneless apps) this also covers
@@ -25,21 +46,61 @@ const REQUEST_ID_HEADERS = ['X-Request-Id', 'X-Correlation-Id'];
  * logged but not reported again.
  */
 export class ReportingErrorHandler {
+  /** @type {((error: unknown) => unknown) | undefined} */
+  #beforeHandle;
+
+  /**
+   * The default value keeps the constructor's length at 0: Angular's DI
+   * refuses an undecorated useClass whose constructor declares parameters.
+   *
+   * @param {ReportingErrorHandlerOptions | null} [options]
+   */
+  constructor(options = {}) {
+    const beforeHandle = options?.beforeHandle;
+    this.#beforeHandle = typeof beforeHandle === 'function' ? beforeHandle : undefined;
+  }
+
   /**
    * @param {unknown} error
    */
   handleError(error) {
+    const unwrapped = unwrapZoneRejection(error);
+    const decision = this.#decide(unwrapped);
+    if (decision === HANDLED) {
+      return;
+    }
     try {
       globalThis.console?.error('ERROR', error);
     } catch {
       // A broken console must not stop the report.
     }
-    const unwrapped = unwrapZoneRejection(error);
+    if (decision === SKIP) {
+      return;
+    }
     if (isHttpErrorResponse(unwrapped)) {
       reportHttpErrorResponse(unwrapped);
       return;
     }
     captureUncaughtError(unwrapped, { tags: { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM } });
+  }
+
+  /**
+   * Asks the beforeHandle hook. No hook, any other return value and a hook
+   * that throws all mean "report": a broken hook must not lose errors.
+   *
+   * @param {unknown} error
+   * @returns {ErrorHandlingDecision}
+   */
+  #decide(error) {
+    if (!this.#beforeHandle) {
+      return REPORT;
+    }
+    try {
+      const decision = this.#beforeHandle(error);
+      return decision === SKIP || decision === HANDLED ? decision : REPORT;
+    } catch {
+      return REPORT;
+    }
   }
 }
 

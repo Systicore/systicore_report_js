@@ -20,6 +20,7 @@ import {
   ReportingErrorHandler,
   isHttpErrorResponse,
   reportHttpErrorResponse,
+  type ErrorHandlingDecision,
 } from '@systicore/report/angular';
 import { installVueErrorHandler } from '@systicore/report/vue';
 
@@ -76,6 +77,25 @@ const on: boolean = isEnabled();
 
 const handler = new ReportingErrorHandler();
 handler.handleError(new Error('from Angular'));
+const hookedHandler = new ReportingErrorHandler({
+  beforeHandle: (error: unknown): ErrorHandlingDecision =>
+    error instanceof Error && error.name === 'ChunkLoadError' ? 'handled' : 'report',
+});
+new ReportingErrorHandler({
+  beforeHandle: () => {
+    // No decision counts as "report".
+  },
+});
+class AppErrorHandler extends ReportingErrorHandler {
+  override handleError(error: unknown): void {
+    super.handleError(error);
+  }
+}
+const subclassedHandler: ReportingErrorHandler = new AppErrorHandler();
+// @ts-expect-error the decision is a closed set
+new ReportingErrorHandler({ beforeHandle: () => 'ignore' });
+void hookedHandler;
+void subclassedHandler;
 const failure: unknown = { name: 'HttpErrorResponse', status: 500, url: null };
 if (isHttpErrorResponse(failure)) {
   const status: number = failure.status;
