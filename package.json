@@ -9,7 +9,11 @@
     "url": "git+https://github.com/Systicore/systicore_report_js.git"
   },
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./src/facade.js",
+    "./src/angular.js",
+    "./src/vue.js"
+  ],
   "main": "./src/index.js",
   "types": "./index.d.ts",
   "exports": {
