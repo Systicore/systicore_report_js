@@ -11,8 +11,10 @@ import {
   isEnabled,
   reportHttpError,
   setUser,
+  type BreadcrumbInput,
   type IngestEvent,
   type InitOptions,
+  type Tags,
 } from '@systicore/report';
 import {
   ReportingErrorHandler,
@@ -40,6 +42,11 @@ const options: InitOptions = {
     event.error.message?.includes('ChunkLoadError') ? null : event,
   maxQueue: 30,
   useIndexedDbQueue: true,
+  tags: { image: 'tarp-crm_web:1.0.0', canary: false },
+  breadcrumbsProvider: (): BreadcrumbInput[] => [
+    { category: 'ui', message: 'opened planner', ts: Date.now() },
+    { message: 'saved plan', ts: new Date() },
+  ],
 };
 
 const enabled: boolean = init(options);
@@ -83,6 +90,11 @@ restore();
 captureMessage('x', { severity: 'fatal' });
 // @ts-expect-error breadcrumbs need a message
 addBreadcrumb({ category: 'ui' });
+// @ts-expect-error provided breadcrumbs need a message too
+init({ enabled: true, breadcrumbsProvider: () => [{ category: 'ui' }] });
+// @ts-expect-error tag values are primitives
+const nestedTags: Tags = { nested: { deep: true } };
+void nestedTags;
 
 void enabled;
 void queued;

@@ -8,7 +8,7 @@
  * debug on) and the capture reports false.
  */
 
-import { BreadcrumbTrail } from './breadcrumbs.js';
+import { BreadcrumbTrail, mergeProvidedBreadcrumbs } from './breadcrumbs.js';
 import { resolveConfiguration } from './configuration.js';
 import { attachDeliveryTriggers } from './delivery-triggers.js';
 import { describeDevice, resolveInstallId } from './device.js';
@@ -372,8 +372,9 @@ export class ActiveReporter {
       device: this.#device,
       user: this.#currentUser(),
       url: this.#runtime.location?.href,
-      route: this.#callProvider(this.#configuration.routeProvider),
-      breadcrumbs: this.#breadcrumbs.snapshot(),
+      route: this.#callProvider(this.#configuration.routeProvider, 'routeProvider'),
+      tags: this.#configuration.tags,
+      breadcrumbs: this.#currentBreadcrumbs(),
     };
   }
 
@@ -381,7 +382,7 @@ export class ActiveReporter {
    * @returns {{ id?: unknown, issuer?: unknown } | null}
    */
   #currentUser() {
-    const provided = this.#callProvider(this.#configuration.userProvider);
+    const provided = this.#callProvider(this.#configuration.userProvider, 'userProvider');
     if (typeof provided === 'object' && provided !== null) {
       return /** @type {{ id?: unknown, issuer?: unknown }} */ (provided);
     }
@@ -389,17 +390,38 @@ export class ActiveReporter {
   }
 
   /**
+   * The trail plus the app's breadcrumbsProvider steps. Entries the merge
+   * cannot read cost the provided steps, never the report.
+   *
+   * @returns {import('./event-builder.js').Breadcrumb[]}
+   */
+  #currentBreadcrumbs() {
+    const trail = this.#breadcrumbs.snapshot();
+    const provided = this.#callProvider(
+      this.#configuration.breadcrumbsProvider,
+      'breadcrumbsProvider',
+    );
+    try {
+      return mergeProvidedBreadcrumbs(trail, provided, this.#runtime.now());
+    } catch (failure) {
+      this.#logger.warn('the breadcrumbsProvider result could not be read', failure);
+      return trail;
+    }
+  }
+
+  /**
    * @param {(() => unknown) | undefined} provider
+   * @param {string} optionName for the debug log
    * @returns {unknown}
    */
-  #callProvider(provider) {
+  #callProvider(provider, optionName) {
     if (!provider) {
       return undefined;
     }
     try {
       return provider() ?? undefined;
     } catch (failure) {
-      this.#logger.warn('a userProvider or routeProvider threw', failure);
+      this.#logger.warn(`${optionName} threw`, failure);
       return undefined;
     }
   }

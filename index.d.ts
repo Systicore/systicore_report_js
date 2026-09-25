@@ -31,6 +31,19 @@ export interface Breadcrumb {
   message: string;
 }
 
+/** A breadcrumb from the app's own log, as returned by `breadcrumbsProvider`. */
+export interface BreadcrumbInput {
+  /** Default "log". */
+  category?: BreadcrumbCategory | undefined;
+  /** Cut to 200 characters, URL queries removed. */
+  message: string;
+  /** When it happened: a Date, epoch milliseconds or an RFC 3339 string. Default: the capture time. */
+  ts?: Date | number | string | undefined;
+}
+
+/** At most 10 tags are sent; keys up to 32, values up to 128 characters. Null and undefined values are skipped. */
+export type Tags = Record<string, string | number | boolean | null | undefined>;
+
 /** The ingest body (contract §3), as passed to `beforeSend`. */
 export interface IngestEvent {
   error: {
@@ -87,6 +100,20 @@ export interface InitOptions {
   /** Read at every capture without an explicit `route`, e.g. the current route template. */
   routeProvider?: (() => string | null | undefined) | undefined;
   /**
+   * Tags added to every event, e.g. `{ image: 'tarp-planner_web:1.4.2' }`.
+   * Copied at init(). A capture's own tags win on a key clash and are kept
+   * first when the 10-tag limit applies.
+   */
+  tags?: Tags | undefined;
+  /**
+   * Read at every capture: steps from the app's own log (oldest first). They
+   * are merged with the reporter's breadcrumbs by time, and the newest 20
+   * are sent; only the last 20 returned entries are read. A provider that
+   * throws is ignored.
+   */
+  breadcrumbsProvider?:
+    (() => ReadonlyArray<BreadcrumbInput | string> | null | undefined) | undefined;
+  /**
    * Last chance to change or drop an event (return null). Synchronous; a hook
    * that throws drops the event. The result is size-limited again.
    */
@@ -113,8 +140,8 @@ export interface CaptureOptions {
   /** Route template, e.g. "/vault/:id". */
   route?: string | undefined;
   requestId?: string | undefined;
-  /** At most 10; keys up to 32, values up to 128 characters. */
-  tags?: Record<string, string | number | boolean | null | undefined> | undefined;
+  /** At most 10; keys up to 32, values up to 128 characters. Merged over the global `tags` of init(). */
+  tags?: Tags | undefined;
 }
 
 export type CaptureExceptionOptions = CaptureOptions;
