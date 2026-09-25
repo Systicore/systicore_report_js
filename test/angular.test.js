@@ -8,6 +8,7 @@ import {
   reportHttpErrorResponse,
 } from '../src/angular.js';
 import { captureMessage, flush, init, reportHttpError } from '../src/index.js';
+import { HOLD_LIMIT_MILLISECONDS } from '../src/startup-hold.js';
 import { VALID_OPTIONS, createFetchRecorder } from './support/fake-runtime.js';
 
 /** The fields of Angular's HttpErrorResponse the adapter reads. */
@@ -22,6 +23,41 @@ function httpErrorResponse(status, url, headers = {}) {
     error: null,
     headers: { get: (name) => headers[name.toLowerCase()] ?? null },
   };
+}
+
+/** What the recorded requests reported: [type, code, severity, action] each. */
+function reportedEvents(recorder) {
+  return recorder.requests.map(({ body }) => [
+    body.error.type,
+    body.error.code,
+    body.error.severity,
+    body.error.action,
+  ]);
+}
+
+/**
+ * Gives the page a navigator whose onLine the test switches, and restarts
+ * the reporter so it reads that navigator.
+ *
+ * @param {import('node:test').TestContext} context
+ */
+function useSwitchableNavigator(context) {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const switchableNavigator = { onLine: true, userAgent: 'Mozilla/5.0 (test)' };
+  Object.defineProperty(globalThis, 'navigator', {
+    value: switchableNavigator,
+    configurable: true,
+    writable: true,
+  });
+  context.after(() => {
+    if (originalDescriptor) {
+      Object.defineProperty(globalThis, 'navigator', originalDescriptor);
+    } else {
+      delete (/** @type {any} */ (globalThis).navigator);
+    }
+  });
+  init(VALID_OPTIONS);
+  return switchableNavigator;
 }
 
 describe('Angular adapter', () => {
@@ -299,6 +335,130 @@ describe('Angular adapter', () => {
         ['TypeError', 'critical', 'bootstrap'],
       );
       assert.equal(context?.tags, undefined);
+    });
+
+    /**
+     * A bootstrap that waits until the test finishes it, and is finished at
+     * the latest when the test ends, so a failed assertion cannot leave a
+     * start pending for the tests after it.
+     *
+     * @param {import('node:test').TestContext} context
+     */
+    function pendingBootstrap(context) {
+      let resolveBootstrap = () => {};
+      const bootstrapped = bootstrapWithReporting(
+        () => new Promise((resolve) => (resolveBootstrap = resolve)),
+      );
+      const finish = async () => {
+        resolveBootstrap();
+        await bootstrapped;
+      };
+      context.after(finish);
+      return { finish };
+    }
+
+    test('an offline network failure that stops the bootstrap is not reported', async (context) => {
+      const switchableNavigator = useSwitchableNavigator(context);
+      const handler = new ReportingErrorHandler();
+      const request = { method: 'GET', url: '/api/config' };
+      const withInterceptor = httpErrorResponse(0, '/api/config');
+      const withoutInterceptor = httpErrorResponse(0, '/api/config');
+      const beforeErrorHandler = httpErrorResponse(0, '/api/config');
+      switchableNavigator.onLine = false;
+
+      reportHttpErrorResponse(withInterceptor, request);
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, withInterceptor)));
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, withoutInterceptor)));
+      await assert.rejects(
+        bootstrapWithReporting(() => {
+          throw beforeErrorHandler;
+        }),
+      );
+      switchableNavigator.onLine = true;
+      await flush();
+
+      assert.deepEqual(reportedEvents(recorder), []);
+    });
+
+    test('a 5xx or an online network failure that stops the bootstrap keeps its HTTP event', async () => {
+      const handler = new ReportingErrorHandler();
+      const request = { method: 'GET', url: '/api/config' };
+      for (const status of [503, 0]) {
+        const response = httpErrorResponse(status, '/api/config');
+        reportHttpErrorResponse(response, request);
+        await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, response)));
+      }
+      await flush();
+
+      assert.deepEqual(reportedEvents(recorder), [
+        ['HttpError', 'HTTP_503', 'error', 'GET /api/config'],
+        ['NetworkError', 'NETWORK_ERROR', 'warning', 'GET /api/config'],
+      ]);
+    });
+
+    test('an ApiError the app passed to reportHttpError follows its status', async () => {
+      const handler = new ReportingErrorHandler();
+      const unauthorized = Object.assign(new Error('Unauthorized'), { name: 'ApiError' });
+      const unavailable = Object.assign(new Error('Service Unavailable'), { name: 'ApiError' });
+      reportHttpError({ method: 'GET', urlTemplate: '/api/me', status: 401, error: unauthorized });
+      reportHttpError({ method: 'GET', urlTemplate: '/api/me', status: 503, error: unavailable });
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, unauthorized)));
+      await assert.rejects(bootstrapWithReporting(failingBootstrap(handler, unavailable)));
+      await flush();
+
+      assert.deepEqual(reportedEvents(recorder), [
+        ['HttpError', 'HTTP_503', 'error', 'GET /api/me'],
+        ['ApiError', undefined, 'critical', 'bootstrap'],
+      ]);
+      assert.deepEqual(recorder.requests[1].body.context.tags, {
+        mechanism: 'angular.ErrorHandler',
+      });
+    });
+
+    test('other errors met while bootstrapping keep their severity', async (context) => {
+      const handler = new ReportingErrorHandler();
+      const failure = new Error('APP_INITIALIZER failed');
+      await assert.rejects(
+        bootstrapWithReporting(async () => {
+          await Promise.resolve();
+          handler.handleError(new Error('ResizeObserver loop limit exceeded'));
+          handler.handleError(failure);
+          throw failure;
+        }),
+      );
+      const succeeding = pendingBootstrap(context);
+      handler.handleError(new Error('third-party script error'));
+      await flush();
+      assert.equal(recorder.requests.length, 2, 'held until the bootstrap settles');
+
+      await succeeding.finish();
+      await flush();
+      assert.deepEqual(
+        recorder.requests.map(({ body }) => [body.error.message, body.error.severity]),
+        [
+          ['APP_INITIALIZER failed', 'critical'],
+          ['ResizeObserver loop limit exceeded', 'error'],
+          ['third-party script error', 'error'],
+        ],
+      );
+      assert.equal(recorder.requests[2].body.error.action, undefined);
+    });
+
+    test('a bootstrap that does not settle holds an error for the hold limit at most', async (context) => {
+      context.mock.timers.enable({ apis: ['setTimeout'] });
+      const handler = new ReportingErrorHandler();
+      pendingBootstrap(context);
+      handler.handleError(new Error('while the start hangs'));
+
+      context.mock.timers.tick(HOLD_LIMIT_MILLISECONDS - 1);
+      await flush();
+      assert.equal(recorder.requests.length, 0);
+      context.mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(
+        recorder.requests.map(({ body }) => [body.error.message, body.error.severity]),
+        [['while the start hangs', 'error']],
+      );
     });
 
     test('a 4xx that stops the bootstrap is reported as critical', async () => {

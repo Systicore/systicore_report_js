@@ -10,22 +10,23 @@
  *
  *   { provide: ErrorHandler, useFactory: () => new ReportingErrorHandler({ beforeHandle }) }
  *
- * and bootstrapWithReporting() around bootstrapApplication(), so a failed
- * start is reported as critical.
+ * and bootstrapWithReporting() around bootstrapApplication(), so the error
+ * that stops the start is reported as critical.
  */
 
-import { captureException, captureUncaughtError, reportHttpError } from './facade.js';
+import { captureStartupFailure, captureUncaughtError, reportHttpError } from './facade.js';
+import { StartupHold } from './startup-hold.js';
 
 const ANGULAR_ERROR_HANDLER_MECHANISM = 'angular.ErrorHandler';
 
-/** How a failure during bootstrapWithReporting() is reported. */
+/** How the error that stops bootstrapWithReporting()'s bootstrap is reported. */
 const BOOTSTRAP_CAPTURE_OPTIONS = Object.freeze({ action: 'bootstrap', severity: 'critical' });
 
 /**
- * How many bootstrapWithReporting() calls are waiting for Angular. While one
- * is, ReportingErrorHandler reports with BOOTSTRAP_CAPTURE_OPTIONS.
+ * The errors ReportingErrorHandler meets while a bootstrapWithReporting()
+ * call waits for Angular, held until it is known which one stopped the start.
  */
-let pendingBootstraps = 0;
+const startupHold = new StartupHold();
 
 /**
  * Error objects a beforeHandle hook kept from being reported ("skip" or
@@ -61,7 +62,8 @@ const HANDLED = 'handled';
  * provideBrowserGlobalErrorListeners() (zoneless apps) this also covers
  * uncaught errors and unhandled rejections, so installGlobalHandlers() is
  * not needed. An error object the app already passed to reportHttpError is
- * logged but not reported again.
+ * logged but not reported again. While bootstrapWithReporting() waits for
+ * Angular, reports are held until it is known which error stopped the start.
  */
 export class ReportingErrorHandler {
   /** @type {((error: unknown) => unknown) | undefined} */
@@ -102,10 +104,8 @@ export class ReportingErrorHandler {
       reportHttpErrorResponse(unwrapped);
       return;
     }
-    const tags = { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM };
-    captureUncaughtError(
-      unwrapped,
-      pendingBootstraps > 0 ? { ...BOOTSTRAP_CAPTURE_OPTIONS, tags } : { tags },
+    startupHold.reportOrHold(unwrapped, () =>
+      captureUncaughtError(unwrapped, { tags: errorHandlerTags() }),
     );
   }
 
@@ -130,38 +130,42 @@ export class ReportingErrorHandler {
 }
 
 /**
- * Runs Angular's bootstrap so that a failed start is reported as critical:
+ * Runs Angular's bootstrap so that the error that stops the start is
+ * reported as critical, with action "bootstrap":
  *
  *   bootstrapWithReporting(() => bootstrapApplication(App, appConfig))
  *     .catch((error) => console.error(error));
  *
  * Angular hands an app-initializer or root-component failure to the
- * ErrorHandler before the bootstrap promise rejects, so by the time a
- * .catch() runs the error has already been reported at the default
- * severity. While `bootstrap` runs, ReportingErrorHandler therefore reports
- * with action "bootstrap" and severity "critical". The rejection itself is
- * reported here as well, which covers failures thrown before the
- * ErrorHandler exists and HTTP 4xx failures the ErrorHandler only keeps as
- * breadcrumbs; one error object is still sent once, and an error a
- * beforeHandle hook skipped or handled is left alone. The returned promise
- * settles like the bootstrap's own.
+ * ErrorHandler a few microtasks before the bootstrap promise rejects with
+ * it, and one error object is sent once, so a .catch() that captures it
+ * comes too late. While `bootstrap` runs, ReportingErrorHandler therefore
+ * holds the errors it would report, until the bootstrap settles (at most
+ * 1 s each, see StartupHold). The one the bootstrap rejects with is
+ * reported as critical; the others keep their usual severity. The rejection
+ * is reported even when the ErrorHandler never saw it (an environment
+ * initializer fails before the ErrorHandler exists).
+ *
+ * HTTP failures follow the HTTP layer: one it reported (>= 500, or a network
+ * failure while online) keeps its HTTP event, a network failure while
+ * offline stays unreported, and any other status (a 4xx) that stops the
+ * start is reported as critical. An error a beforeHandle hook skipped or
+ * handled is left alone. The returned promise settles like the bootstrap's
+ * own.
  *
  * @template Result
  * @param {() => Result | PromiseLike<Result>} bootstrap
  * @returns {Promise<Result>}
  */
 export async function bootstrapWithReporting(bootstrap) {
-  pendingBootstraps += 1;
+  startupHold.begin();
   try {
     return await bootstrap();
   } catch (error) {
-    const unwrapped = unwrapZoneRejection(error);
-    if (!errorsKeptFromReporting.has(/** @type {object} */ (unwrapped))) {
-      captureException(unwrapped, BOOTSTRAP_CAPTURE_OPTIONS);
-    }
+    reportBootstrapFailure(unwrapZoneRejection(error));
     throw error;
   } finally {
-    pendingBootstraps -= 1;
+    startupHold.end();
   }
 }
 
@@ -213,6 +217,34 @@ export function reportHttpErrorResponse(response, request) {
   } catch {
     return false;
   }
+}
+
+/**
+ * @param {unknown} failure what the bootstrap rejected with, unwrapped
+ */
+function reportBootstrapFailure(failure) {
+  const seenByErrorHandler = startupHold.claim(failure);
+  if (errorsKeptFromReporting.has(/** @type {object} */ (failure))) {
+    return;
+  }
+  if (isHttpErrorResponse(failure)) {
+    // Let the HTTP layer judge it first, as ReportingErrorHandler does; a
+    // no-op when the interceptor or the ErrorHandler already did.
+    reportHttpErrorResponse(failure);
+  }
+  captureStartupFailure(
+    failure,
+    seenByErrorHandler
+      ? { ...BOOTSTRAP_CAPTURE_OPTIONS, tags: errorHandlerTags() }
+      : BOOTSTRAP_CAPTURE_OPTIONS,
+  );
+}
+
+/**
+ * @returns {Record<string, string>} the tags of a report from ReportingErrorHandler
+ */
+function errorHandlerTags() {
+  return { mechanism: ANGULAR_ERROR_HANDLER_MECHANISM };
 }
 
 /**

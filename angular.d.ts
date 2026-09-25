@@ -48,7 +48,8 @@ export declare class ReportingErrorHandler {
 }
 
 /**
- * Runs Angular's bootstrap so that a failed start is reported as critical:
+ * Runs Angular's bootstrap so that the error that stops the start is
+ * reported with action "bootstrap" and severity "critical":
  *
  * ```ts
  * bootstrapWithReporting(() => bootstrapApplication(App, appConfig)).catch((error) =>
@@ -58,10 +59,17 @@ export declare class ReportingErrorHandler {
  *
  * Angular reports an app-initializer or root-component failure to the
  * ErrorHandler before the bootstrap promise rejects. While `bootstrap` runs,
- * ReportingErrorHandler therefore reports with action "bootstrap" and
- * severity "critical"; the rejection is reported too when the ErrorHandler
- * did not report it (thrown before the ErrorHandler exists, or an HTTP 4xx).
- * An error a `beforeHandle` hook skipped or handled is left alone.
+ * ReportingErrorHandler therefore holds its reports until the bootstrap
+ * settles (at most 1 s each): the error the bootstrap rejects with is
+ * reported as critical, every other error at its usual severity. The
+ * rejection is reported even when the ErrorHandler never saw it (thrown
+ * before the ErrorHandler exists).
+ *
+ * HTTP failures follow the HTTP layer: one it already reported (status
+ * >= 500, or a network failure while online) keeps its HTTP event and
+ * severity, a network failure while offline is not reported, and any other
+ * status (a 4xx) is reported as critical. An error a `beforeHandle` hook
+ * skipped or handled is left alone.
  * @returns a promise that settles like the bootstrap's own
  */
 export declare function bootstrapWithReporting<Result>(
