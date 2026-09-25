@@ -9,7 +9,7 @@
  * existing app.config.errorHandler keeps working.
  */
 
-import { captureException } from './index.js';
+import { captureException } from './facade.js';
 
 const VUE_ERROR_HANDLER_MECHANISM = 'vue.errorHandler';
 

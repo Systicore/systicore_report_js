@@ -9,7 +9,7 @@
  * arguments.
  */
 
-import { captureException, reportHttpError } from './index.js';
+import { captureException, reportHttpError } from './facade.js';
 
 const ANGULAR_ERROR_HANDLER_MECHANISM = 'angular.ErrorHandler';
 
