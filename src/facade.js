@@ -71,6 +71,20 @@ export function captureUncaughtError(error, options) {
 }
 
 /**
+ * For the Angular bootstrap helper: reports the error that stopped the app
+ * from starting. Like captureUncaughtError, but an error object the HTTP
+ * layer kept only as a breadcrumb because of its status (a 4xx) is reported.
+ * Not part of the public API.
+ *
+ * @param {unknown} error
+ * @param {CaptureOptions} [options]
+ * @returns {boolean} true when the event was queued for delivery
+ */
+export function captureStartupFailure(error, options) {
+  return dispatch((reporter) => reporter.captureStartupFailure(error, options));
+}
+
+/**
  * @param {string} message
  * @param {CaptureOptions} [options]
  * @returns {boolean}

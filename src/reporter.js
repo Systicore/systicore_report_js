@@ -17,10 +17,11 @@ import { describeError } from './error-description.js';
 import { EventQueue, NULL_STORE } from './event-queue.js';
 import { assembleEvent, limitEvent } from './event-builder.js';
 import {
+  HTTP_VERDICTS,
   breadcrumbOfHttpCall,
   captureOfHttpFailure,
   describeHttpCall,
-  isReportableHttpFailure,
+  judgeHttpCall,
 } from './http-failure.js';
 import { IndexedDbStore, queueDatabaseName } from './indexed-db-store.js';
 import { createLogger } from './logger.js';
@@ -50,6 +51,7 @@ import {
  * @property {boolean} enabled
  * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureException
  * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureUncaughtError
+ * @property {(error: unknown, options?: CaptureOptions | null) => boolean} captureStartupFailure
  * @property {(message: unknown, options?: CaptureOptions | null) => boolean} captureMessage
  * @property {(details: import('./http-failure.js').HttpFailureDetails) => boolean} reportHttpError
  * @property {(user: { id?: unknown, issuer?: unknown } | null | undefined) => void} setUser
@@ -92,6 +94,10 @@ export class DisabledReporter {
     return false;
   }
 
+  captureStartupFailure() {
+    return false;
+  }
+
   captureMessage() {
     return false;
   }
@@ -127,11 +133,13 @@ export class ActiveReporter {
   /** Error objects already reported, so one error seen by two handlers is sent once. */
   #reportedErrors = new WeakSet();
   /**
-   * Every error object passed to reportHttpError, reported or not. The HTTP
-   * layer has decided about each of them, so a second pass and the handlers
-   * of uncaught errors leave them alone.
+   * The verdict on every error object passed to reportHttpError, reported or
+   * not. The HTTP layer has decided about each of them, so a second pass and
+   * the handlers of uncaught errors respect that decision.
+   *
+   * @type {WeakMap<object, import('./http-failure.js').HttpVerdict>}
    */
-  #httpErrors = new WeakSet();
+  #httpVerdicts = new WeakMap();
 
   /**
    * @param {import('./configuration.js').Configuration} configuration
@@ -208,12 +216,38 @@ export class ActiveReporter {
    */
   captureUncaughtError(error, options) {
     try {
-      if (canBeRemembered(error) && this.#httpErrors.has(error)) {
+      if (this.#httpVerdictOf(error) !== undefined) {
         return false;
       }
       return this.captureException(error, options);
     } catch (failure) {
       this.#logger.warn('captureUncaughtError failed', failure);
+      return false;
+    }
+  }
+
+  /**
+   * Reports the error that stopped the app from starting (the Angular
+   * bootstrap helper passes action "bootstrap" and severity "critical").
+   * Like captureUncaughtError, except that an error object the HTTP layer
+   * kept only as a breadcrumb because of its status (a 4xx) is reported: a
+   * start that a client error stops is a bug. One the HTTP layer reported
+   * keeps its HTTP event, and a network failure while offline stays
+   * unreported.
+   *
+   * @param {unknown} error
+   * @param {CaptureOptions | null} [options]
+   * @returns {boolean} true when the event was queued for delivery
+   */
+  captureStartupFailure(error, options) {
+    try {
+      const verdict = this.#httpVerdictOf(error);
+      if (verdict !== undefined && verdict !== HTTP_VERDICTS.CLIENT_FAILURE) {
+        return false;
+      }
+      return this.captureException(error, options);
+    } catch (failure) {
+      this.#logger.warn('captureStartupFailure failed', failure);
       return false;
     }
   }
@@ -255,16 +289,19 @@ export class ActiveReporter {
   reportHttpError(details) {
     try {
       const httpFailure = details ?? {};
-      if (!this.#rememberHttpError(httpFailure.error)) {
+      if (this.#httpVerdictOf(httpFailure.error) !== undefined) {
         return false;
       }
       const call = describeHttpCall(httpFailure);
-      if (call.target?.startsWith(this.#configuration.url)) {
+      const verdict = judgeHttpCall(call, this.#configuration.url, isOnline(this.#runtime));
+      if (canBeRemembered(httpFailure.error)) {
+        this.#httpVerdicts.set(httpFailure.error, verdict);
+      }
+      if (verdict === HTTP_VERDICTS.REPORTING_ENDPOINT) {
         return false;
       }
       const reported =
-        isReportableHttpFailure(call) &&
-        (call.status !== undefined || isOnline(this.#runtime)) &&
+        verdict === HTTP_VERDICTS.REPORTABLE &&
         this.#claimReport(httpFailure.error) &&
         this.#submit(captureOfHttpFailure(call, httpFailure));
       this.#breadcrumbs.add({ category: 'http', message: breadcrumbOfHttpCall(call) });
@@ -447,21 +484,15 @@ export class ActiveReporter {
   }
 
   /**
-   * Remembers `error` as seen by the HTTP layer. Returns false when it
-   * already was. Primitive values and a missing error always pass.
+   * What reportHttpError decided about `error`; undefined when the HTTP
+   * layer never saw it. Primitive values and a missing error are never
+   * remembered.
    *
    * @param {unknown} error
-   * @returns {boolean}
+   * @returns {import('./http-failure.js').HttpVerdict | undefined}
    */
-  #rememberHttpError(error) {
-    if (!canBeRemembered(error)) {
-      return true;
-    }
-    if (this.#httpErrors.has(error)) {
-      return false;
-    }
-    this.#httpErrors.add(error);
-    return true;
+  #httpVerdictOf(error) {
+    return canBeRemembered(error) ? this.#httpVerdicts.get(error) : undefined;
   }
 
   /**

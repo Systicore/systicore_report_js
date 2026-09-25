@@ -226,6 +226,47 @@ describe('uncaught errors the HTTP layer has seen', () => {
     assert.deepEqual(requests[0].body.context.tags, { mechanism: 'test' });
   });
 
+  test('a startup failure is reported unless the HTTP layer reported it or it happened offline', async () => {
+    const { reporter, requests, goOffline, goOnline } = setUp();
+    const clientFailure = new Error('ApiError 401');
+    const serverFailure = new Error('ApiError 503');
+    const onlineNetworkFailure = new TypeError('Failed to fetch');
+    const offlineNetworkFailure = new TypeError('Failed to fetch');
+    const reportsBackendFailure = new TypeError('Failed to fetch');
+    const unrelatedFailure = new RangeError('bad config');
+    const startup = { action: 'bootstrap', severity: 'critical' };
+    reporter.reportHttpError({ urlTemplate: '/api/me', status: 401, error: clientFailure });
+    reporter.reportHttpError({ urlTemplate: '/api/config', status: 503, error: serverFailure });
+    reporter.reportHttpError({ urlTemplate: '/api/a', status: 0, error: onlineNetworkFailure });
+    reporter.reportHttpError({
+      url: `${VALID_OPTIONS.url}/api/v1/ingest`,
+      status: 0,
+      error: reportsBackendFailure,
+    });
+    goOffline();
+    reporter.reportHttpError({ urlTemplate: '/api/b', status: 0, error: offlineNetworkFailure });
+    goOnline();
+
+    assert.equal(reporter.captureStartupFailure(clientFailure, startup), true);
+    assert.equal(reporter.captureStartupFailure(serverFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(onlineNetworkFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(offlineNetworkFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(reportsBackendFailure, startup), false);
+    assert.equal(reporter.captureStartupFailure(unrelatedFailure, startup), true);
+    assert.equal(reporter.captureStartupFailure(unrelatedFailure, startup), false);
+    await reporter.flush();
+
+    assert.deepEqual(
+      requests.map(({ body }) => [body.error.message, body.error.severity, body.error.action]),
+      [
+        ['/api/config failed with HTTP 503', 'error', '/api/config'],
+        ['/api/a failed: network error', 'warning', '/api/a'],
+        ['ApiError 401', 'critical', 'bootstrap'],
+        ['bad config', 'critical', 'bootstrap'],
+      ],
+    );
+  });
+
   test('an explicit captureException still reports a 4xx error the HTTP layer only saw', async () => {
     const { reporter, requests } = setUp();
     const clientFailure = new Error('ApiError 409');
