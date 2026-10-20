@@ -7,6 +7,53 @@ export type Severity = 'warning' | 'error' | 'critical';
 
 export type BreadcrumbCategory = 'http' | 'nav' | 'ui' | 'log';
 
+/**
+ * What caused a reported failure (see "Noise classification" in the README):
+ * a real defect, or the environment.
+ */
+export type Classification =
+  | 'defect'
+  | 'offline'
+  | 'aborted'
+  | 'network'
+  | 'timeout'
+  | 'extension'
+  | 'bot';
+
+/** The classes noise classification can act on: every class but "defect". */
+export type NoiseClassification = Exclude<Classification, 'defect'>;
+
+/**
+ * - `report`: sent as captured, with its classification.
+ * - `report_low`: sent with severity lowered to "warning".
+ * - `drop`: not sent; counted and passed to `onSuppressed`.
+ */
+export type NoiseAction = 'report' | 'report_low' | 'drop';
+
+/** An event noise classification dropped, as passed to `onSuppressed`. */
+export interface SuppressedEvent {
+  classification: NoiseClassification;
+  /** Events of this class dropped since init(), this one included. */
+  count: number;
+  /** The message the event would have had, e.g. "GET /api/v1/user failed: network error". */
+  message: string | undefined;
+  action: string | undefined;
+  /** The original error object, when there was one. */
+  error: unknown;
+}
+
+export interface NoiseOptions {
+  /** Default true. false: no classification, as in 0.2 (offline network failures stay unreported). */
+  enabled?: boolean | undefined;
+  /**
+   * Per-class action. Default: offline and aborted `drop`; network, timeout,
+   * extension and bot `report_low`.
+   */
+  policy?: Partial<Record<NoiseClassification, NoiseAction>> | undefined;
+  /** Called for each dropped event. Synchronous; a hook that throws is ignored. */
+  onSuppressed?: ((event: SuppressedEvent) => void) | undefined;
+}
+
 export interface Release {
   /** App version, e.g. "1.4.2+17". Also sent as device.appVersion. */
   version?: string | undefined;
@@ -54,6 +101,8 @@ export interface IngestEvent {
     action?: string;
     severity?: Severity;
     fingerprint?: string;
+    /** Set by noise classification; an unknown value is not sent. */
+    classification?: Classification;
   };
   release?: Release;
   environment?: string;
@@ -112,7 +161,8 @@ export interface InitOptions {
    * throws is ignored.
    */
   breadcrumbsProvider?:
-    (() => ReadonlyArray<BreadcrumbInput | string> | null | undefined) | undefined;
+    | (() => ReadonlyArray<BreadcrumbInput | string> | null | undefined)
+    | undefined;
   /**
    * Last chance to change or drop an event (return null). Synchronous; a hook
    * that throws drops the event. The result is size-limited again.
@@ -124,6 +174,11 @@ export interface InitOptions {
   useIndexedDbQueue?: boolean | undefined;
   /** Client-side limit of events per minute. Default 20. */
   rateLimitPerMinute?: number | undefined;
+  /**
+   * Noise classification: tells real defects from failures the environment
+   * caused. On by default; `false` switches it off.
+   */
+  noise?: NoiseOptions | false | undefined;
   /** Log the reporter's own problems (bad config, dropped events) to the console. Default false. */
   debug?: boolean | undefined;
 }

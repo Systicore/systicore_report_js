@@ -40,6 +40,7 @@ describe('reportHttpError', () => {
       message: 'GET /api/vault/:id failed with HTTP 502',
       action: 'GET /api/vault/:id',
       severity: 'error',
+      classification: 'defect',
     });
     assert.equal(context.requestId, 'req-9');
     assert.deepEqual(context.tags, { mechanism: 'http', 'http.status': '502' });
@@ -61,6 +62,7 @@ describe('reportHttpError', () => {
       message: 'POST /api/items failed: network error',
       action: 'POST /api/items',
       severity: 'warning',
+      classification: 'network',
     });
     assert.equal(requests[0].body.context.tags['http.error'], 'TypeError');
   });

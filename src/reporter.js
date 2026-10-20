@@ -25,8 +25,10 @@ import {
 } from './http-failure.js';
 import { IndexedDbStore, queueDatabaseName } from './indexed-db-store.js';
 import { createLogger } from './logger.js';
+import { LOW_SEVERITY, PageLifecycle, classifyFailure, isBotNavigator } from './noise.js';
 import { detectRuntime, isOnline } from './runtime.js';
 import { serializeEvent } from './serializer.js';
+import { toOptionalText } from './text.js';
 import { DuplicateFilter, RateLimiter, duplicateIdentityOf } from './throttle.js';
 import {
   FetchTransport,
@@ -140,6 +142,11 @@ export class ActiveReporter {
    * @type {WeakMap<object, import('./http-failure.js').HttpVerdict>}
    */
   #httpVerdicts = new WeakMap();
+  /** @type {PageLifecycle | undefined} undefined while noise classification is off */
+  #lifecycle;
+  #bot;
+  /** @type {Map<import('./noise.js').Classification, number>} events dropped per class */
+  #suppressedCounts = new Map();
 
   /**
    * @param {import('./configuration.js').Configuration} configuration
@@ -169,6 +176,8 @@ export class ActiveReporter {
       logger,
     });
     this.#detachTriggers = attachDeliveryTriggers(runtime, this.#dispatcher);
+    this.#bot = isBotNavigator(runtime.navigator);
+    this.#lifecycle = configuration.noise.enabled ? new PageLifecycle(runtime) : undefined;
     this.#restored = queue
       .restore(runtime.now())
       .then(() => this.#dispatcher.drain())
@@ -187,7 +196,8 @@ export class ActiveReporter {
       }
       const captureOptions = options ?? {};
       const description = describeError(error);
-      return this.#submit({
+      const classification = this.#classify({ error, trace: description.trace });
+      return this.#submitClassified(classification, error, {
         ...description,
         code: captureOptions.code ?? description.code,
         action: captureOptions.action,
@@ -260,7 +270,7 @@ export class ActiveReporter {
   captureMessage(message, options) {
     try {
       const captureOptions = options ?? {};
-      return this.#submit({
+      return this.#submitClassified(this.#classify({}), undefined, {
         message: typeof message === 'string' ? message : String(message),
         code: captureOptions.code,
         action: captureOptions.action,
@@ -301,9 +311,17 @@ export class ActiveReporter {
         return false;
       }
       const reported =
-        verdict === HTTP_VERDICTS.REPORTABLE &&
+        this.#isHttpFailureSubmitted(verdict) &&
         this.#claimReport(httpFailure.error) &&
-        this.#submit(captureOfHttpFailure(call, httpFailure));
+        this.#submitClassified(
+          // The error of a call that got a status (a 5xx) carries the
+          // response body, not a transport failure: only the status counts.
+          this.#classify(
+            call.status === undefined ? { error: httpFailure.error, httpNetworkFailure: true } : {},
+          ),
+          httpFailure.error,
+          captureOfHttpFailure(call, httpFailure),
+        );
       this.#breadcrumbs.add({ category: 'http', message: breadcrumbOfHttpCall(call) });
       return reported;
     } catch (failure) {
@@ -351,8 +369,93 @@ export class ActiveReporter {
   }
 
   dispose() {
+    this.#lifecycle?.dispose();
     this.#detachTriggers();
     this.#dispatcher.dispose();
+  }
+
+  /**
+   * A server fault or a network failure while online is submitted; with
+   * noise classification on, a network failure while offline is too, and
+   * its "offline" class decides (by default: dropped and counted).
+   *
+   * @param {import('./http-failure.js').HttpVerdict} verdict
+   * @returns {boolean}
+   */
+  #isHttpFailureSubmitted(verdict) {
+    return (
+      verdict === HTTP_VERDICTS.REPORTABLE ||
+      (verdict === HTTP_VERDICTS.OFFLINE && this.#lifecycle !== undefined)
+    );
+  }
+
+  /**
+   * @param {import('./noise.js').FailureInput} input
+   * @returns {import('./noise.js').Classification | undefined} undefined while classification is off
+   */
+  #classify(input) {
+    if (!this.#lifecycle) {
+      return undefined;
+    }
+    return classifyFailure(input, {
+      online: isOnline(this.#runtime),
+      leaving: this.#lifecycle.leaving,
+      bot: this.#bot,
+    });
+  }
+
+  /**
+   * Applies the class's action: "drop" counts the event and tells the
+   * onSuppressed hook instead of sending it, "report_low" lowers the
+   * severity to warning, and the class is sent as error.classification.
+   *
+   * @param {import('./noise.js').Classification | undefined} classification
+   * @param {unknown} error the original error, for the onSuppressed hook
+   * @param {import('./event-builder.js').Capture} capture
+   * @returns {boolean}
+   */
+  #submitClassified(classification, error, capture) {
+    if (classification === undefined) {
+      return this.#submit(capture);
+    }
+    const action =
+      classification === 'defect' ? 'report' : this.#configuration.noise.policy[classification];
+    if (action === 'drop') {
+      this.#suppress(classification, error, capture);
+      return false;
+    }
+    return this.#submit({
+      ...capture,
+      classification,
+      severity: action === 'report_low' ? LOW_SEVERITY : capture.severity,
+    });
+  }
+
+  /**
+   * @param {import('./noise.js').Classification} classification
+   * @param {unknown} error
+   * @param {import('./event-builder.js').Capture} capture
+   */
+  #suppress(classification, error, capture) {
+    const count = (this.#suppressedCounts.get(classification) ?? 0) + 1;
+    this.#suppressedCounts.set(classification, count);
+    const message = toOptionalText(capture.message);
+    this.#logger.warn(`event not sent: classified as ${classification} (${count} so far)`, message);
+    const onSuppressed = this.#configuration.noise.onSuppressed;
+    if (!onSuppressed) {
+      return;
+    }
+    try {
+      onSuppressed({
+        classification,
+        count,
+        message,
+        action: toOptionalText(capture.action),
+        error,
+      });
+    } catch (failure) {
+      this.#logger.warn('onSuppressed threw', failure);
+    }
   }
 
   /**

@@ -20,12 +20,12 @@ Apps install a tagged GitHub tarball. The `node:alpine` builders have no
 git, and the tarball needs no token:
 
 ```bash
-npm install https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.2.0
+npm install https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.3.0
 ```
 
 ```json
 "dependencies": {
-  "@systicore/report": "https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.2.0"
+  "@systicore/report": "https://codeload.github.com/Systicore/systicore_report_js/tar.gz/refs/tags/v0.3.0"
 }
 ```
 
@@ -37,7 +37,7 @@ Entry points:
 | `@systicore/report/angular` | `ReportingErrorHandler`, `bootstrapWithReporting`, `reportHttpErrorResponse`, `isHttpErrorResponse` |
 | `@systicore/report/vue` | `installVueErrorHandler` |
 
-Bundle size: about 25 kB minified, 9 kB gzip, all of it in the initial
+Bundle size: about 28 kB minified, 10 kB gzip, all of it in the initial
 bundle, because the reporter has to be ready before the app bootstraps.
 An Angular app close to its `initial` budget (500 kB warning by default)
 may cross it; raise the budget in `angular.json` rather than splitting the
@@ -83,6 +83,7 @@ Other options:
 | `maxQueue` | `30` | Events kept while offline or backing off. Beyond it, the oldest is dropped. |
 | `useIndexedDbQueue` | `false` | Persists the queue in IndexedDB, so events captured offline survive a reload. For offline-first PWAs. |
 | `rateLimitPerMinute` | `20` | Client-side cap on events per minute. |
+| `noise` | on | Noise classification: `{ enabled?, policy?, onSuppressed? }`, or `false` to switch it off. See [Noise classification](#noise-classification). |
 | `debug` | `false` | Logs the reporter's own problems (bad config, dropped events) to the console. |
 
 ## Angular (zoneless)
@@ -132,7 +133,7 @@ none. Then:
 | The one the bootstrap rejects with, unless an HTTP row below applies | action `bootstrap`, severity `critical`, whether or not the ErrorHandler saw it (an environment initializer fails before the ErrorHandler exists) |
 | Any other error met meanwhile (a third-party script error, a `ResizeObserver` loop) | as usual: default severity, no action |
 | An HTTP failure the interceptor (or `reportHttpError`) already reported: status ≥ 500, or a network failure while online | its HTTP event only, e.g. `HTTP_503` at `error` or `NETWORK_ERROR` at `warning` with action `GET /api/config`; no second event |
-| A network failure while offline | not reported, like any offline failure |
+| A network failure while offline | not reported, like any offline failure (see [Noise classification](#noise-classification)) |
 | Any other HTTP status (a 4xx), which the interceptor keeps only as a breadcrumb | action `bootstrap`, severity `critical`: a start a client error stops is a bug |
 | An error a `beforeHandle` hook skipped or handled | not reported |
 
@@ -351,6 +352,57 @@ a URL with ids. The server groups by type or code, the normalized message
 and the top in-app stack frames. To group by your own rule, pass
 `fingerprint` (up to 64 characters of `[A-Za-z0-9._:-]`).
 
+## Noise classification
+
+Many failures are not defects: the device went offline, the user left the
+page while a request ran, an ad blocker or a CORS rule stopped a call, a
+browser extension threw, a crawler rendered the page. Every event says
+which it is in `error.classification`, and each class has an action:
+
+| Classification | When | Default action |
+|---|---|---|
+| `defect` | Anything below does not apply: a real bug, a 5xx. | `report` (always) |
+| `offline` | A network failure (status 0, `Failed to fetch`, `Load failed` …) while `navigator.onLine` is `false`. | `drop` |
+| `aborted` | An `AbortError`, Safari's `cancelled`, an XHR `abort` event, or a network failure while the page is leaving: after `pagehide` (until `pageshow`), within 10 s of `beforeunload`, or while the document is hidden. | `drop` |
+| `timeout` | A `TimeoutError` (`AbortSignal.timeout()`), `ETIMEDOUT`/`ECONNABORTED`, an XHR `timeout` event, `timeout of …ms exceeded`. | `report_low` |
+| `network` | Any other network failure without a status: CORS, an opaque response, a blocked request, DNS, TLS (`Failed to fetch`, `Load failed`, `NetworkError when attempting to fetch resource.`). | `report_low` |
+| `extension` | A stack frame from `chrome-extension://`, `moz-extension://`, `safari-extension://` or `safari-web-extension://`. | `report_low` |
+| `bot` | A crawler, headless or automated browser: `navigator.webdriver`, or a user agent with bot, crawler, spider, headless, Lighthouse, PageSpeed, Puppeteer, Playwright … | `report_low` |
+
+The first row that matches wins, top to bottom. A call that got an HTTP
+status (a 5xx) is never `offline`, `aborted`, `timeout` or `network`, only
+`bot` or `defect`. A failed dynamic import (`Failed to fetch dynamically
+imported module`) stays a `defect`: it usually means a stale deployment.
+
+| Action | Effect |
+|---|---|
+| `report` | Sent as captured, with its classification. |
+| `report_low` | Sent with severity `warning` (the lowest the ingest contract knows). |
+| `drop` | Not sent. The reporter counts it per class, logs it with `debug: true` and passes it to `onSuppressed`. |
+
+Classification applies to `reportHttpError` (and so to
+`reportHttpErrorResponse`), to uncaught errors and to `captureException`;
+`captureMessage` is only `bot` or `defect`. The error object of a dropped
+HTTP failure is still remembered, so it does not come back as an uncaught
+error. `beforeSend` sees the classification and may change it; an unknown
+value is not sent.
+
+```js
+init({
+  // …
+  noise: {
+    policy: { network: 'report', bot: 'drop' }, // the other classes keep their defaults
+    onSuppressed: ({ classification, count, message }) =>
+      console.debug(`[report] dropped ${classification} #${count}: ${message}`),
+  },
+});
+
+init({ /* … */ noise: false }); // no classification, as in 0.2
+```
+
+`noise: false` (or `{ enabled: false }`) restores 0.2: no `classification`
+field, and a network failure while offline is still not reported.
+
 ## Content Security Policy
 
 `fetch` and `sendBeacon` both fall under `connect-src`, so the reports
@@ -378,7 +430,7 @@ request": a POST with a `text/plain;charset=UTF-8` body and the key in
 
 ```json
 {
-  "error": { "type": "TypeError", "code": "…", "message": "…", "trace": "…", "action": "GET /api/vault/:id", "severity": "error" },
+  "error": { "type": "TypeError", "code": "…", "message": "…", "trace": "…", "action": "GET /api/vault/:id", "severity": "error", "classification": "defect" },
   "release": { "version": "1.4.2+17", "commit": "abc1234", "buildTime": "2026-09-24T10:00:00Z" },
   "environment": "production",
   "platform": "web",
@@ -454,6 +506,24 @@ point their dependency at the new tag's tarball URL. The archive leaves
 out `test/` and the tooling files (see `.gitattributes`).
 
 ## Changelog
+
+### 0.3.0
+
+Backward compatible: apps on 0.2.0 compile and run unchanged, but fewer
+false positives reach the reports backend.
+
+Added:
+
+- Noise classification, on by default: every event carries
+  `error.classification` (`defect`, `offline`, `aborted`, `network`,
+  `timeout`, `extension`, `bot`). Offline and aborted failures (the page
+  leaving, `AbortError`) are no longer sent; network, timeout, extension
+  and bot events are sent as `warning`. `init({ noise: { policy,
+  onSuppressed } })` sets the action per class (`report`, `report_low`,
+  `drop`); `noise: false` switches it off. See
+  [Noise classification](#noise-classification).
+
+Size: about 4 kB minified (1.5 kB gzip) more than 0.2.0.
 
 ### 0.2.0
 

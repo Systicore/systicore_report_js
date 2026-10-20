@@ -12,6 +12,8 @@ import {
   reportHttpError,
   setUser,
   type BreadcrumbInput,
+  type Classification,
+  type SuppressedEvent,
   type IngestEvent,
   type InitOptions,
   type Tags,
@@ -123,6 +125,21 @@ init({ enabled: true, breadcrumbsProvider: () => [{ category: 'ui' }] });
 // @ts-expect-error tag values are primitives
 const nestedTags: Tags = { nested: { deep: true } };
 void nestedTags;
+
+init({
+  enabled: true,
+  noise: {
+    policy: { network: 'report', bot: 'drop', offline: 'report_low' },
+    onSuppressed: (event: SuppressedEvent) => console.debug(event.classification, event.count),
+  },
+});
+init({ enabled: true, noise: false });
+// @ts-expect-error "defect" is always reported
+init({ enabled: true, noise: { policy: { defect: 'drop' } } });
+// @ts-expect-error unknown action
+init({ enabled: true, noise: { policy: { network: 'ignore' } } });
+const classified: Classification | undefined = ({} as IngestEvent).error.classification;
+void classified;
 
 void enabled;
 void queued;
