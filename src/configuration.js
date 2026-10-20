@@ -3,6 +3,7 @@
  * off instead of failing: a bad REPORTS_* value must never break the app.
  */
 
+import { resolveNoiseConfiguration } from './noise.js';
 import { DEFAULT_RATE_LIMIT_PER_MINUTE } from './throttle.js';
 import { toOptionalText } from './text.js';
 
@@ -33,6 +34,7 @@ const ENABLED_WORDS = new Set(['true', '1', 'yes', 'on']);
  * @property {number} maxQueue
  * @property {number} rateLimitPerMinute
  * @property {boolean} useIndexedDbQueue
+ * @property {import('./noise.js').NoiseConfiguration} noise
  * @property {boolean} debug
  */
 
@@ -83,6 +85,7 @@ export function resolveConfiguration(options) {
         RATE_LIMIT_UPPER_BOUND,
       ),
       useIndexedDbQueue: settings.useIndexedDbQueue === true,
+      noise: resolveNoiseConfiguration(settings.noise),
       debug: settings.debug === true,
     },
   };

@@ -17,6 +17,7 @@ import {
   TAG_KEY_MAX_CHARACTERS,
   TAG_VALUE_MAX_CHARACTERS,
 } from './limits.js';
+import { CLASSIFICATIONS } from './noise.js';
 import {
   stripUrlQueriesInText,
   stripUrlQuery,
@@ -46,6 +47,7 @@ const SCRUB_INPUT_HEADROOM = 2;
  * @property {unknown} [action]
  * @property {unknown} [severity]
  * @property {unknown} [fingerprint]
+ * @property {unknown} [classification] see noise.js
  * @property {unknown} [route]
  * @property {unknown} [requestId]
  * @property {Record<string, unknown>} [tags]
@@ -79,6 +81,7 @@ const SCRUB_INPUT_HEADROOM = 2;
  * @property {string} [action]
  * @property {string} [severity]
  * @property {string} [fingerprint]
+ * @property {import('./noise.js').Classification} [classification]
  */
 
 /**
@@ -107,6 +110,7 @@ export function assembleEvent(capture, scope) {
       action: capture.action,
       severity: capture.severity,
       fingerprint: capture.fingerprint,
+      classification: capture.classification,
     },
     release: scope.release,
     environment: scope.environment,
@@ -192,6 +196,7 @@ function limitError(error) {
     action: capUrlLike(error.action, FIELD_BYTE_LIMITS.action),
     severity: normalizeSeverity(error.severity),
     fingerprint: normalizeFingerprint(error.fingerprint),
+    classification: normalizeClassification(error.classification),
   });
 }
 
@@ -344,6 +349,19 @@ export function normalizeBreadcrumbCategory(category) {
 export function normalizeSeverity(severity) {
   const normalized = typeof severity === 'string' ? severity.trim().toLowerCase() : '';
   return SEVERITIES.includes(normalized) ? normalized : DEFAULT_SEVERITY;
+}
+
+/**
+ * Unknown classifications are left out rather than sent.
+ *
+ * @param {unknown} classification
+ * @returns {import('./noise.js').Classification | undefined}
+ */
+function normalizeClassification(classification) {
+  return typeof classification === 'string' &&
+    CLASSIFICATIONS.includes(/** @type {any} */ (classification))
+    ? /** @type {import('./noise.js').Classification} */ (classification)
+    : undefined;
 }
 
 /**

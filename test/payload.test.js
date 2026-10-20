@@ -61,6 +61,7 @@ describe('ingest payload (contract §3)', () => {
         action: 'GET /api/vault/:id',
         severity: 'critical',
         fingerprint: 'vault.sync:v1',
+        classification: 'defect',
       },
       release: { version: '1.4.2+17', commit: 'abc1234', buildTime: '2026-09-24T09:00:00Z' },
       environment: 'production',
@@ -102,6 +103,7 @@ describe('ingest payload (contract §3)', () => {
       message: 'Cache rebuilt from scratch',
       action: 'startup',
       severity: 'error',
+      classification: 'defect',
     });
     assert.equal(requests[0].body.release, undefined);
     assert.equal(requests[0].body.environment, undefined);
